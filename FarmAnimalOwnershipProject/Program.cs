@@ -6,6 +6,7 @@ using Mutagen.Bethesda.Skyrim;
 using Mutagen.Bethesda.Synthesis;
 using Newtonsoft.Json;
 using Noggog;
+using System.Diagnostics;
 
 
 namespace FarmAnimalOwnershipProject
@@ -277,6 +278,46 @@ namespace FarmAnimalOwnershipProject
         // get a turn once naming has had its shot. Partial matches still go LAST within that so
         // a broad catch-all key like "Riften" can't hijack e.g. Snow-Shod Farm (whose location
         // EDID contains "Riften") away from a more specific exact match or naming match.
+        // Highest-priority check (tried before naming conventions): instead of searching every faction
+        // in the load order, this restricts the search to factions ORIGINALLY DEFINED BY the same
+        // plugin that placed the animal (e.g. a farm mod's own "Soc_MyFarm_Whiterun" faction for an
+        // animal that same mod placed in WhiterunExterior01), then fuzzy-matches the cell/location
+        // EditorID's root against those plugin-local factions' EditorIDs. This is a direct port of the
+        // same check added to the sister Valuables/Harvestables patchers — flagged there as possibly a
+        // weaker fit here, since farm-animal mods often name their locations after the FARM rather than
+        // reusing a vanilla town name, which is exactly the case TryGetTownFaction's naming-convention
+        // checks below already handle well. Worth evaluating against real load orders either way.
+        private static (IFactionGetter? Faction, string? Reason) TryGetPluginLocalFactionMatch(
+            string pluginName,
+            ILocationGetter? location,
+            ICellGetter? cell,
+            Dictionary<string, List<IFactionGetter>> factionsByPlugin)
+        {
+            if (!factionsByPlugin.TryGetValue(pluginName, out var localFactions) || localFactions.Count == 0)
+                return (null, null);
+
+            string?[] editorIds = [cell?.EditorID, location?.EditorID];
+
+            foreach (var edid in editorIds)
+            {
+                if (edid == null)
+                    continue;
+
+                foreach (var root in GetTownRootCandidates(edid))
+                {
+                    var match = localFactions.FirstOrDefault(f =>
+                        f.EditorID != null &&
+                        (f.EditorID.Contains(root, StringComparison.OrdinalIgnoreCase)
+                            || root.Contains(f.EditorID, StringComparison.OrdinalIgnoreCase)));
+
+                    if (match != null)
+                        return (match, "Plugin-Derived faction match");
+                }
+            }
+
+            return (null, null);
+        }
+
         private static (IFactionGetter? Faction, string? Reason) TryGetTownFaction(
             ILocationGetter? location,
             Dictionary<string, IFactionGetter> factionsByEdid,
@@ -304,7 +345,7 @@ namespace FarmAnimalOwnershipProject
                     factionsByEdid,
                     extraRoots: GetTownRootCandidates(cell.EditorID));
                 if (cellFarmFactionResult.Faction != null)
-                    return (cellFarmFactionResult.Faction, $"Cell faction match");
+                    return (cellFarmFactionResult.Faction, $"Cell-Name faction match");
 
             }
 
@@ -399,11 +440,18 @@ namespace FarmAnimalOwnershipProject
 
                 var faction = ResolveOverrideFaction(entry.FactionEditorID.Trim(), factionsByEdid);
                 if (faction != null)
-                    return (faction, "Plugin faction match");
+                    return (faction, "Plugin-Name faction match");
             }
 
             return (null, null);
         }
+
+        // Caches the resolved winning ICellGetter by cell FormKey. The chain-walk to find the immediate
+        // containing cell (following context.Parent pointers) is cheap in-memory traversal, but the
+        // linkCache.TryResolve<ICellGetter> call at the end is not — and many placed NPCs routinely
+        // share the same containing cell, so that resolve was being repeated redundantly for the same
+        // cell over and over. Caching by FormKey collapses it to once per unique cell in the load order.
+        private static readonly Dictionary<FormKey, ICellGetter?> ResolvedCellCache = new();
 
         // Walks up the placed-NPC's context chain to find its containing cell, re-resolving through
         // the link cache to guarantee the fully-merged winning override (rather than a minimal stub
@@ -417,10 +465,15 @@ namespace FarmAnimalOwnershipProject
             {
                 if (current.Record is ICellGetter cell)
                 {
-                    if (linkCache.TryResolve<ICellGetter>(cell.FormKey, out var winningCell))
-                        return winningCell;
+                    if (ResolvedCellCache.TryGetValue(cell.FormKey, out var cached))
+                        return cached;
 
-                    return cell;
+                    ICellGetter? resolved = linkCache.TryResolve<ICellGetter>(cell.FormKey, out var winningCell)
+                        ? winningCell
+                        : cell;
+
+                    ResolvedCellCache[cell.FormKey] = resolved;
+                    return resolved;
                 }
 
                 current = current.Parent;
@@ -475,8 +528,11 @@ namespace FarmAnimalOwnershipProject
 
         public static void RunPatch(IPatcherState<ISkyrimMod, ISkyrimModGetter> state)
         {
+            var overallStopwatch = Stopwatch.StartNew();
+
             var settings = LoadRunSettings(state);
             PopulateManualFactionMatches(settings);
+            ResolvedCellCache.Clear();
 
 
             PrintShortDivider();
@@ -493,15 +549,35 @@ namespace FarmAnimalOwnershipProject
             // }
             // PrintDivider();
 
+            var factionLookupStopwatch = Stopwatch.StartNew();
             var factionsByEdid = new Dictionary<string, IFactionGetter>(StringComparer.OrdinalIgnoreCase);
+            var factionsByPlugin = new Dictionary<string, List<IFactionGetter>>(StringComparer.OrdinalIgnoreCase);
             foreach (var fac in state.LoadOrder.PriorityOrder.Faction().WinningOverrides())
             {
                 if (fac.EditorID != null)
                     factionsByEdid.TryAdd(fac.EditorID, fac);
+
+                // Grouped by the plugin that ORIGINALLY defined the faction (FormKey.ModKey), not
+                // whichever plugin's override happens to be winning — that's what "factions available
+                // in the plugin" means for the Plugin-local faction match check below.
+                string originPlugin = fac.FormKey.ModKey.FileName;
+                if (!factionsByPlugin.TryGetValue(originPlugin, out var pluginFactions))
+                    factionsByPlugin[originPlugin] = pluginFactions = [];
+
+                pluginFactions.Add(fac);
             }
+            factionLookupStopwatch.Stop();
 
             var seen = new HashSet<FormKey>();
             var ownerEdidCache = new Dictionary<FormKey, string?>();
+
+            // Caches the "is this base NPC record a farm-animal race, and what's its label/race info?"
+            // classification by the base NPC's FormKey. This used to be recomputed — including a full
+            // placedNpc.Base.TryResolve(...) LinkCache call plus a Race.TryResolve(...) call — for EVERY
+            // placed NPC instance with zero caching, even though many placed animals routinely share the
+            // exact same base NPC template (e.g. one "Cow01" record placed hundreds of times across the
+            // world). Caching by FormKey means each unique base NPC template only gets resolved once.
+            var npcBaseCache = new Dictionary<FormKey, (bool Resolved, string AnimalLabel, string RaceEdid, string DisplayRace, bool IsFarmAnimalRace)>();
 
             // Tallies, keyed by the containing cell's FormKey — built in Pass 1, consulted in
             // Pass 2 only as a fallback once naming conventions, manual faction matches, and
@@ -554,11 +630,18 @@ namespace FarmAnimalOwnershipProject
             ConsoleWriteLine("SCANNING...".PadLeft(35));
             PrintShortDivider();
 
+            var findCellStopwatch = new Stopwatch();
+            var npcResolveStopwatch = new Stopwatch();
+
             // ---- Pass 1: race-check every placed NPC. ----
+            var pass1Stopwatch = Stopwatch.StartNew();
             foreach (var context in state.LoadOrder.PriorityOrder.PlacedNpc().WinningContextOverrides(state.LinkCache))
             {
                 var placedNpc = context.Record;
+
+                findCellStopwatch.Start();
                 var containingCell = FindContainingCell(context, state.LinkCache);
+                findCellStopwatch.Stop();
 
                 // Cells without an EditorID (e.g. many exterior cells) are treated as unknown.
                 var cellEdid = containingCell?.EditorID ?? "Unknown cell";
@@ -566,14 +649,42 @@ namespace FarmAnimalOwnershipProject
                 if (!seen.Add(placedNpc.FormKey))
                     continue;
 
-                var npc = placedNpc.Base.TryResolve(state.LinkCache);
-                if (npc == null)
+                // Classification (resolve + race check) is cached by base NPC FormKey — see
+                // npcBaseCache's declaration above for why this matters. The counting below still
+                // happens once per PLACED INSTANCE using the cached classification, exactly as before.
+                var baseFormKey = placedNpc.Base.FormKey;
+                if (!npcBaseCache.TryGetValue(baseFormKey, out var npcInfo))
+                {
+                    npcResolveStopwatch.Start();
+                    var npc = placedNpc.Base.TryResolve(state.LinkCache);
+                    if (npc == null)
+                    {
+                        npcInfo = (Resolved: false, AnimalLabel: "", RaceEdid: "", DisplayRace: "", IsFarmAnimalRace: false);
+                    }
+                    else
+                    {
+                        var resolvedAnimalLabel = npc.EditorID ?? "UnknownNPC";
+                        var resolvedRaceEdid = npc.Race.TryResolve(state.LinkCache)?.EditorID ?? "UnknownRace";
+                        bool resolvedIsFarmAnimalRace = settings.IncludeRaceTerms.Any(term =>
+                            resolvedRaceEdid.Contains(term, StringComparison.OrdinalIgnoreCase));
+                        var resolvedDisplayRace = resolvedRaceEdid.EndsWith("Race", StringComparison.OrdinalIgnoreCase)
+                            ? resolvedRaceEdid[..^"Race".Length]
+                            : resolvedRaceEdid;
+
+                        npcInfo = (Resolved: true, AnimalLabel: resolvedAnimalLabel, RaceEdid: resolvedRaceEdid, DisplayRace: resolvedDisplayRace, IsFarmAnimalRace: resolvedIsFarmAnimalRace);
+                    }
+                    npcResolveStopwatch.Stop();
+
+                    npcBaseCache[baseFormKey] = npcInfo;
+                }
+
+                if (!npcInfo.Resolved)
                 {
                     unresolvedNpcBaseCount++;
                     continue;
                 }
 
-                var animalLabel = npc.EditorID ?? "UnknownNPC";
+                var animalLabel = npcInfo.AnimalLabel;
 
                 // Get the actual mod file providing this winning override in the load order
                 string pluginName = context.ModKey.FileName;
@@ -582,19 +693,13 @@ namespace FarmAnimalOwnershipProject
                 allPlacedNpcCountsByPlugin[pluginName] = allCount + 1;
 
                 // Race check first: only farm-animal races are candidates at all.
-                var raceEdid = npc.Race.TryResolve(state.LinkCache)?.EditorID ?? "UnknownRace";
-                bool isFarmAnimalRace = settings.IncludeRaceTerms.Any(term =>
-                    raceEdid.Contains(term, StringComparison.OrdinalIgnoreCase));
-
-                if (!isFarmAnimalRace)
+                if (!npcInfo.IsFarmAnimalRace)
                     continue;
 
                 raceMatchedCountsByPlugin.TryGetValue(pluginName, out var raceMatchedCount);
                 raceMatchedCountsByPlugin[pluginName] = raceMatchedCount + 1;
 
-                var displayRace = raceEdid.EndsWith("Race", StringComparison.OrdinalIgnoreCase)
-                    ? raceEdid[..^"Race".Length]
-                    : raceEdid;
+                var displayRace = npcInfo.DisplayRace;
 
                 animalRaceCounts.TryGetValue(displayRace, out var raceCount);
                 animalRaceCounts[displayRace] = raceCount + 1;
@@ -647,6 +752,7 @@ namespace FarmAnimalOwnershipProject
 
                 candidates.Add((context, animalLabel, pluginName, cellEdid, displayRace, containingCell));
             }
+            pass1Stopwatch.Stop();
 
             // ---- Pass 2: for each unowned candidate, run the existing exclusion + override
             // matching; if no override matches, fall back to the containing cell's ownership vote
@@ -655,61 +761,100 @@ namespace FarmAnimalOwnershipProject
             ConsoleWriteLine("PATCHING...".PadLeft(35));
             PrintShortDivider();
 
+            // Memoizes per-cell work that used to be repeated for every candidate animal in that cell:
+            // resolving the containing Location (previously resolved TWICE per candidate — once for the
+            // loctype exclusion check, once again a few lines later for TryGetTownFaction — despite
+            // being the exact same cell both times), resolving that Location's Keywords, and running
+            // the ExcludeCellRules/ExcludeLocTypeRules checks. None of this depends on the specific
+            // animal — only on the cell.
+            var cellContextCache = new Dictionary<FormKey, (ILocationGetter? Location, bool CellRuleExcluded, string? CellRuleMatched, bool LocTypeExcluded, string? LocTypeRuleMatched)>();
+
+            // Memoizes plugin exclusion by plugin name — same idea, trivial cost either way, but free to cache.
+            var pluginExclusionCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
+            var pass2Stopwatch = Stopwatch.StartNew();
             foreach (var (context, animalLabel, pluginName, cellEdid, displayRace, containingCell) in candidates)
             {
-                // Wildcard-aware... no, partial-match cell exclusion.
-                bool cellExcluded = false;
-                foreach (var rule in settings.ExcludeCellRules)
+                // Dictionary<FormKey,...> requires a non-nullable key, so "no containing cell" uses
+                // FormKey.Null as a sentinel rather than an actual null.
+                var cellCacheKey = containingCell?.FormKey ?? FormKey.Null;
+                if (!cellContextCache.TryGetValue(cellCacheKey, out var cellCtx))
                 {
-                    if (RuleMatchesCell(rule, cellEdid))
+                    ILocationGetter? loc = containingCell?.Location.TryResolve(state.LinkCache);
+
+                    bool cellRuleExcluded = false;
+                    string? cellRuleMatched = null;
+                    foreach (var rule in settings.ExcludeCellRules)
                     {
-                        cellExcluded = true;
-                        if (!excludedCellsByRule.TryGetValue(rule, out var cellList))
-                            excludedCellsByRule[rule] = cellList = [];
-
-                        cellList.Add(animalLabel);
-                        break;
-                    }
-                }
-
-                // Location-type exclusion (matched only against the location's LocType-prefixed
-                // keywords, e.g. LocTypeDungeon — deliberately ignoring unrelated keyword data
-                // like Civil War or world-interaction flags that can share vocabulary with these
-                // terms, the same way the clutter/consumables patchers do).
-                if (!cellExcluded && settings.ExcludeLocTypeRules.Count > 0)
-                {
-                    var loc = containingCell?.Location.TryResolve(state.LinkCache);
-                    var keywordEdids = loc?.Keywords?
-                        .Select(k => k.TryResolve(state.LinkCache)?.EditorID)
-                        .Where(e => e != null && e.StartsWith("LocType", StringComparison.OrdinalIgnoreCase))
-                        .Select(e => e!)
-                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-                    if (keywordEdids != null && keywordEdids.Count > 0)
-                    {
-                        foreach (var rule in settings.ExcludeLocTypeRules)
+                        if (RuleMatchesCell(rule, cellEdid))
                         {
-                            if (keywordEdids.Any(k => k.Contains(rule, StringComparison.OrdinalIgnoreCase)))
-                            {
-                                cellExcluded = true;
-                                if (!excludedLocTypesByRule.TryGetValue(rule, out var list))
-                                    excludedLocTypesByRule[rule] = list = [];
+                            cellRuleExcluded = true;
+                            cellRuleMatched = rule;
+                            break;
+                        }
+                    }
 
-                                list.Add(animalLabel);
-                                break;
+                    // Location-type exclusion (matched only against the location's LocType-prefixed
+                    // keywords, e.g. LocTypeDungeon — deliberately ignoring unrelated keyword data
+                    // like Civil War or world-interaction flags that can share vocabulary with these
+                    // terms, the same way the clutter/consumables patchers do).
+                    bool locTypeExcluded = false;
+                    string? locTypeRuleMatched = null;
+                    if (!cellRuleExcluded && settings.ExcludeLocTypeRules.Count > 0)
+                    {
+                        var keywordEdids = loc?.Keywords?
+                            .Select(k => k.TryResolve(state.LinkCache)?.EditorID)
+                            .Where(e => e != null && e.StartsWith("LocType", StringComparison.OrdinalIgnoreCase))
+                            .Select(e => e!)
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                        if (keywordEdids != null && keywordEdids.Count > 0)
+                        {
+                            foreach (var rule in settings.ExcludeLocTypeRules)
+                            {
+                                if (keywordEdids.Any(k => k.Contains(rule, StringComparison.OrdinalIgnoreCase)))
+                                {
+                                    locTypeExcluded = true;
+                                    locTypeRuleMatched = rule;
+                                    break;
+                                }
                             }
                         }
                     }
+
+                    cellCtx = (loc, cellRuleExcluded, cellRuleMatched, locTypeExcluded, locTypeRuleMatched);
+                    cellContextCache[cellCacheKey] = cellCtx;
                 }
 
-                if (cellExcluded)
+                if (cellCtx.CellRuleExcluded)
                 {
+                    if (!excludedCellsByRule.TryGetValue(cellCtx.CellRuleMatched!, out var cellList))
+                        excludedCellsByRule[cellCtx.CellRuleMatched!] = cellList = [];
+
+                    cellList.Add(animalLabel);
                     excludedCount++;
                     excludedSet.Add(animalLabel);
                     continue;
                 }
 
-                if (IsPluginExcluded(pluginName))
+                if (cellCtx.LocTypeExcluded)
+                {
+                    if (!excludedLocTypesByRule.TryGetValue(cellCtx.LocTypeRuleMatched!, out var list))
+                        excludedLocTypesByRule[cellCtx.LocTypeRuleMatched!] = list = [];
+
+                    list.Add(animalLabel);
+                    excludedCount++;
+                    excludedSet.Add(animalLabel);
+                    continue;
+                }
+
+                if (!pluginExclusionCache.TryGetValue(pluginName, out var pluginExcluded))
+                {
+                    pluginExcluded = IsPluginExcluded(pluginName);
+                    pluginExclusionCache[pluginName] = pluginExcluded;
+                }
+
+                if (pluginExcluded)
                 {
                     if (!excludedAnimalsByPlugin.TryGetValue(pluginName, out var list))
                         excludedAnimalsByPlugin[pluginName] = list = [];
@@ -736,13 +881,21 @@ namespace FarmAnimalOwnershipProject
                 // Matching. Naming conventions and manual faction matches beat plugin-based
                 // matching; the raw location is passed to TryGetTownFaction so these lookups
                 // still run even when there's no location or cell record to go on (the lack
-                // of records only affects the skip reason below).
-                var location = containingCell?.Location.TryResolve(state.LinkCache);
+                // of records only affects the skip reason below). Location comes from the
+                // per-cell cache above — no need to resolve it a second time here.
+                var location = cellCtx.Location;
                 bool hasNoLocationData = location == null && containingCell == null;
 
-                var townFactionResult = TryGetTownFaction(location, factionsByEdid, containingCell);
-                IOwnerGetter? ownerRecord = townFactionResult.Faction;
-                string? ownerReason = townFactionResult.Reason;
+                var pluginLocalResult = TryGetPluginLocalFactionMatch(pluginName, location, containingCell, factionsByPlugin);
+                IOwnerGetter? ownerRecord = pluginLocalResult.Faction;
+                string? ownerReason = pluginLocalResult.Reason;
+
+                if (ownerRecord == null)
+                {
+                    var townFactionResult = TryGetTownFaction(location, factionsByEdid, containingCell);
+                    ownerRecord = townFactionResult.Faction;
+                    ownerReason = townFactionResult.Reason;
+                }
 
                 if (ownerRecord == null)
                 {
@@ -815,6 +968,8 @@ namespace FarmAnimalOwnershipProject
 
                 patchedList.Add((animalLabel, pluginName, ownerLabel, ownerReason ?? "unknown"));
             }
+            pass2Stopwatch.Stop();
+            overallStopwatch.Stop();
 
             PrintReport(
                 settings,
@@ -834,6 +989,52 @@ namespace FarmAnimalOwnershipProject
                 excludedCount,
                 excludedOwnerVotesCount,
                 unresolvedNpcBaseCount);
+
+            // Timing instrumentation — kept in place (Stopwatches above still run; the cost is
+            // negligible) for future debugging, but the printed breakdown is disabled by default.
+            // Uncomment the call below to re-enable the "TIMING BREAKDOWN" console section.
+            // PrintTimingReport(
+            //     overallStopwatch,
+            //     factionLookupStopwatch,
+            //     pass1Stopwatch,
+            //     pass2Stopwatch,
+            //     findCellStopwatch,
+            //     npcResolveStopwatch,
+            //     npcBaseCache.Count,
+            //     candidates.Count);
+        }
+
+        // Prints a breakdown of where the run's time actually went. Temporary diagnostic output —
+        // safe to trim once the bottleneck is identified, but cheap enough (a handful of Stopwatches)
+        // to leave in indefinitely if useful for future tuning on other load orders.
+        private static void PrintTimingReport(
+            Stopwatch overall,
+            Stopwatch factionLookup,
+            Stopwatch pass1,
+            Stopwatch pass2,
+            Stopwatch findCell,
+            Stopwatch npcResolve,
+            int uniqueBaseNpcCount,
+            int candidateCount)
+        {
+            _lastWasDivider = false;
+            PrintShortDivider();
+            ConsoleWriteLine("TIMING BREAKDOWN".PadLeft(36));
+            PrintShortDivider();
+
+            ConsoleWriteLine($"Candidates carried into pass 2: {candidateCount}");
+            ConsoleWriteLine($"Unique base NPC records classified: {uniqueBaseNpcCount}");
+            PrintShortDivider();
+
+            ConsoleWriteLine($"Faction lookup build:          {factionLookup.ElapsedMilliseconds,8} ms");
+            ConsoleWriteLine($"Pass 1 (full load-order scan): {pass1.ElapsedMilliseconds,8} ms");
+            ConsoleWriteLine($"  of which base-NPC resolve:   {npcResolve.ElapsedMilliseconds,8} ms  (once per unique base NPC template, not per placed instance)");
+            ConsoleWriteLine($"Pass 2 (candidate processing): {pass2.ElapsedMilliseconds,8} ms");
+            ConsoleWriteLine($"Cell-finding (combined, both passes): {findCell.ElapsedMilliseconds,8} ms  (included within Pass 1 above, broken out separately since it's a suspect)");
+            PrintShortDivider();
+            ConsoleWriteLine($"TOTAL:                          {overall.ElapsedMilliseconds,8} ms");
+
+            PrintDivider();
         }
 
         // Loads (or generates) the settings file used for this run.
@@ -984,43 +1185,59 @@ namespace FarmAnimalOwnershipProject
                 PrintDivider();
             }
 
-            var totalSkipped = skippedAnimalsByCell.Values.SelectMany(v => v).Count();
-
             _lastWasDivider = false;
             PrintShortDivider();
-            ConsoleWriteLine("SKIPPED BY CELL".PadLeft(35));
-            ConsoleWriteLine($"Total skipped: {totalSkipped}".PadLeft(36));
+            ConsoleWriteLine("OWNERSHIP SOURCE SUMMARY".PadLeft(41));
             PrintShortDivider();
 
-            foreach (var kvp in skippedAnimalsByCell.OrderByDescending(k => k.Value.Count))
+            var bySource = patchedAnimalsByCell.Values
+                .SelectMany(v => v)
+                .GroupBy(a => a.Reason.StartsWith("decision by", StringComparison.OrdinalIgnoreCase) ? "Ownership vote" : a.Reason)
+                .Select(g => new { Reason = g.Key, Count = g.Count() })
+                .OrderByDescending(a => a.Count);
+
+            foreach (var entry in bySource)
             {
-                var cellLabel = kvp.Key;
-                var animals = kvp.Value;
-
-                ConsoleWriteLine($"{cellLabel}   ({animals.Count} skipped)");
-
-                var byPlugin = animals
-                    .GroupBy(a => a.Plugin)
-                    .Select(g => new { Plugin = g.Key, Count = g.Count(), Animals = g.ToList() })
-                    .OrderByDescending(p => p.Count);
-
-                foreach (var pluginGroup in byPlugin)
-                {
-                    ConsoleWriteLine($"     [{pluginGroup.Plugin}] ({pluginGroup.Count})");
-
-                    var byAnimal = pluginGroup.Animals
-                        .GroupBy(a => new { a.Animal, a.Reason })
-                        .Select(g => new { g.Key.Animal, g.Key.Reason, Count = g.Count() })
-                        .OrderByDescending(a => a.Count);
-
-                    foreach (var entry in byAnimal)
-                    {
-                        ConsoleWriteLine($"          {entry.Count} {entry.Animal}   Returned: {entry.Reason}");
-                    }
-                }
-
-                PrintDivider();
+                ConsoleWriteLine($"{entry.Count} farm animals were assigned an owner via: {entry.Reason}");
             }
+
+            // var totalSkipped = skippedAnimalsByCell.Values.SelectMany(v => v).Count();
+            //
+            // _lastWasDivider = false;
+            // PrintShortDivider();
+            // ConsoleWriteLine("SKIPPED BY CELL".PadLeft(35));
+            // ConsoleWriteLine($"Total skipped: {totalSkipped}".PadLeft(36));
+            // PrintShortDivider();
+            //
+            // foreach (var kvp in skippedAnimalsByCell.OrderByDescending(k => k.Value.Count))
+            // {
+            //     var cellLabel = kvp.Key;
+            //     var animals = kvp.Value;
+            //
+            //     ConsoleWriteLine($"{cellLabel}   ({animals.Count} skipped)");
+            //
+            //     var byPlugin = animals
+            //         .GroupBy(a => a.Plugin)
+            //         .Select(g => new { Plugin = g.Key, Count = g.Count(), Animals = g.ToList() })
+            //         .OrderByDescending(p => p.Count);
+            //
+            //     foreach (var pluginGroup in byPlugin)
+            //     {
+            //         ConsoleWriteLine($"     [{pluginGroup.Plugin}] ({pluginGroup.Count})");
+            //
+            //         var byAnimal = pluginGroup.Animals
+            //             .GroupBy(a => new { a.Animal, a.Reason })
+            //             .Select(g => new { g.Key.Animal, g.Key.Reason, Count = g.Count() })
+            //             .OrderByDescending(a => a.Count);
+            //
+            //         foreach (var entry in byAnimal)
+            //         {
+            //             ConsoleWriteLine($"          {entry.Count} {entry.Animal}   Returned: {entry.Reason}");
+            //         }
+            //     }
+            //
+            //     PrintDivider();
+            // }
 
             _lastWasDivider = false;
             PrintShortDivider();

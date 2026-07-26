@@ -57,8 +57,8 @@ namespace FarmAnimalOwnershipProject
         [JsonProperty]
         public List<string> ExcludeOwnerNames { get; set; } =
         [
-            "Player", "PlayerFaction", "CW", "Bandit", "Hagraven", "Fort", "Draugr", "JobMerchantFaction",
-            "Fake", "CarriageDriver", "CarriageSystemFaction",
+            "Player", "CW", "Bandit", "Hagraven", "Fort", "Draugr", "JobMerchantFaction",
+            "Fake", "CarriageDriver", "CarriageSystemFaction", "RiverwoodCamillaFaction", "Service", 
         ];
 
         [DisplayName("Minimum owned animals required for a majority")]
@@ -80,7 +80,8 @@ namespace FarmAnimalOwnershipProject
         [JsonProperty]
         public List<string> ExcludePlugins { get; set; } =
         [
-            "Vigilant", "SkyrimUnderground", "HearthFire", "cc", "Glenmoril", "HorrorOfMorthal",
+            "Vigilant", "SkyrimUnderground", "HearthFire", "cc", "Glenmoril", "HorrorOfMorthal", "BattleAftermath", 
+            "CWB", 
         ];
 
         [DisplayName("Cells to exclude")]
@@ -88,7 +89,7 @@ namespace FarmAnimalOwnershipProject
         [JsonProperty]
         public List<string> ExcludeCellRules { get; set; } =
         [
-            "BYOH", "cc", "Helgen",
+            "BYOH", "cc", "Helgen", "Labyrinthian", "POI", "CW", "DrelassCottage", "Attack", 
         ];
 
         [DisplayName("Location Types to exclude")]
