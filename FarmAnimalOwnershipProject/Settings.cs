@@ -72,7 +72,8 @@ namespace FarmAnimalOwnershipProject
         public List<string> ExcludeNameTerms { get; set; } =
         [
             "Wild", "Bandit", "Forsworn", "Sabre", "Pigeon", "Zombie", "Draugr", "Durzog", "Stray", "Dead", "Ghost",
-            "Vampire", "Necromancer", "Bone", "Feral", "Giant", "Dragon", "Troll", "ShellBug", "Netch",
+            "Vampire", "Necromancer", "Bone", "Feral", "Giant", "Dragon", "Troll", "ShellBug", "Netch", "BYOH", 
+            "Player", "CW", 
         ];
 
         [DisplayName("Plugins to exclude")]

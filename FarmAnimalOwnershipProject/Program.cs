@@ -886,6 +886,20 @@ namespace FarmAnimalOwnershipProject
                 var location = cellCtx.Location;
                 bool hasNoLocationData = location == null && containingCell == null;
 
+                // Display-only label for report grouping — falls back to the Location's EditorID when
+                // the Cell itself has none (very common for unnamed exterior wilderness cells in
+                // Skyrim), so "Unknown cell" only appears when there's truly nothing to show. Tagged
+                // with which record the name actually came from, since a Cell name and a Location name
+                // aren't the same thing and it wasn't always obvious which one was being shown. This is
+                // deliberately separate from cellEdid above, which still drives ExcludeCellRules
+                // matching unchanged — using the Location fallback there too would silently change
+                // which items get excluded, not just how they're labeled in the report.
+                var cellDisplayLabel = containingCell?.EditorID != null
+                    ? $"{containingCell.EditorID} [Cell]"
+                    : location?.EditorID != null
+                        ? $"{location.EditorID} [Location]"
+                        : "Unknown cell";
+
                 var pluginLocalResult = TryGetPluginLocalFactionMatch(pluginName, location, containingCell, factionsByPlugin);
                 IOwnerGetter? ownerRecord = pluginLocalResult.Faction;
                 string? ownerReason = pluginLocalResult.Reason;
@@ -948,7 +962,7 @@ namespace FarmAnimalOwnershipProject
                         unknownSet.Add(animalLabel);
                     }
 
-                    AddSkip(skippedAnimalsByCell, animalLabel, pluginName, cellEdid, reason);
+                    AddSkip(skippedAnimalsByCell, animalLabel, pluginName, cellDisplayLabel, reason);
                     continue;
                 }
 
@@ -961,8 +975,8 @@ namespace FarmAnimalOwnershipProject
                 patchedRaceCounts.TryGetValue(displayRace, out var patchedRaceCount);
                 patchedRaceCounts[displayRace] = patchedRaceCount + 1;
 
-                if (!patchedAnimalsByCell.TryGetValue(cellEdid, out var patchedList))
-                    patchedAnimalsByCell[cellEdid] = patchedList = [];
+                if (!patchedAnimalsByCell.TryGetValue(cellDisplayLabel, out var patchedList))
+                    patchedAnimalsByCell[cellDisplayLabel] = patchedList = [];
 
                 var ownerLabel = (ownerRecord as IMajorRecordGetter)?.EditorID ?? "Unknown owner";
 
