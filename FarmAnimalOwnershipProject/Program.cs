@@ -851,7 +851,7 @@ namespace FarmAnimalOwnershipProject
                             ownerRecord = majorityOwner;
 
                             ownerCounts.TryGetValue(majorityOwnerFormKey, out var voteWinningCount);
-                            ownerReason = $"decision by {voteWinningCount}/{totalOwnedInCell} owned animals";
+                            ownerReason = $"ownership vote ({voteWinningCount}/{totalOwnedInCell} ownership share before patching)";
 
                             rankCountsByCellOwner.TryGetValue((containingCell.FormKey, majorityOwnerFormKey), out var rankCounts);
                             rankToApply = PickRepresentativeRank(rankCounts);
@@ -1060,7 +1060,7 @@ namespace FarmAnimalOwnershipProject
 
                     foreach (var entry in byAnimal)
                     {
-                        ConsoleWriteLine($"          {entry.Count} {entry.Animal}(s)  now owned by:  {entry.OwnerFaction}  through:  {entry.Reason}");
+                        ConsoleWriteLine($"          {entry.Count} x {entry.Animal}  now owned by:  {entry.OwnerFaction}  through:  {entry.Reason}");
                     }
                 }
 
@@ -1074,7 +1074,7 @@ namespace FarmAnimalOwnershipProject
 
             var bySource = patchedAnimalsByCell.Values
                 .SelectMany(v => v)
-                .GroupBy(a => a.Reason.StartsWith("decision by", StringComparison.OrdinalIgnoreCase) ? "Ownership vote" : a.Reason)
+                .GroupBy(a => a.Reason.StartsWith("ownership vote", StringComparison.OrdinalIgnoreCase) ? "Ownership vote" : a.Reason)
                 .Select(g => new { Reason = g.Key, Count = g.Count() })
                 .OrderByDescending(a => a.Count);
 
@@ -1116,7 +1116,7 @@ namespace FarmAnimalOwnershipProject
 
                         foreach (var entry in byAnimal)
                         {
-                            ConsoleWriteLine($"          {entry.Count} {entry.Animal}   Returned: {entry.Reason}");
+                            ConsoleWriteLine($"          {entry.Count} x {entry.Animal}   skipped: {entry.Reason}");
                         }
                     }
 
