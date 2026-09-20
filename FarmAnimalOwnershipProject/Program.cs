@@ -762,7 +762,7 @@ namespace FarmAnimalOwnershipProject
                         excludedCellsByRule[cellCtx.CellRuleMatched!] = cellList = [];
 
                     cellList.Add(animalLabel);
-                    excludedDetails.Add((animalLabel, displayRace, cellDisplayLabel, pluginName, cellCtx.CellRuleMatched!, "cell"));
+                    excludedDetails.Add((animalLabel, displayRace, cellDisplayLabel, pluginName, cellCtx.CellRuleMatched!, "Cell EditorID"));
                     excludedCount++;
                     continue;
                 }
@@ -773,7 +773,7 @@ namespace FarmAnimalOwnershipProject
                         excludedLocTypesByRule[cellCtx.LocTypeRuleMatched!] = list = [];
 
                     list.Add(animalLabel);
-                    excludedDetails.Add((animalLabel, displayRace, cellDisplayLabel, pluginName, cellCtx.LocTypeRuleMatched!, "loctype"));
+                    excludedDetails.Add((animalLabel, displayRace, cellDisplayLabel, pluginName, cellCtx.LocTypeRuleMatched!, "LocType keyword EditorID"));
                     excludedCount++;
                     continue;
                 }
@@ -790,7 +790,7 @@ namespace FarmAnimalOwnershipProject
                         excludedAnimalsByPlugin[pluginName] = list = [];
 
                     list.Add(animalLabel);
-                    excludedDetails.Add((animalLabel, displayRace, cellDisplayLabel, pluginName, matchedPluginRule, "plugin"));
+                    excludedDetails.Add((animalLabel, displayRace, cellDisplayLabel, pluginName, matchedPluginRule, "Plugin filename"));
                     excludedCount++;
                     continue;
                 }
@@ -803,7 +803,7 @@ namespace FarmAnimalOwnershipProject
                         excludedNamesByRule[matchedNameTerm] = list = [];
 
                     list.Add(animalLabel);
-                    excludedDetails.Add((animalLabel, displayRace, cellDisplayLabel, pluginName, matchedNameTerm, "name"));
+                    excludedDetails.Add((animalLabel, displayRace, cellDisplayLabel, pluginName, matchedNameTerm, "Base NPC EditorID"));
                     excludedCount++;
                     continue;
                 }
@@ -1057,7 +1057,7 @@ namespace FarmAnimalOwnershipProject
         {
             _lastWasDivider = false;
             PrintShortDivider();
-            ConsoleWriteLine("PLACED NPCs SEEN, BY PLUGIN".PadLeft(46));
+            ConsoleWriteLine("PLACED NPCs SEEN, BY PLUGIN FILENAME".PadLeft(46));
             PrintShortDivider();
             ConsoleWriteLine("(diagnostic: shows every plugin the patcher saw ANY placed NPC from, and how many of");
             ConsoleWriteLine("those race-matched as farm animals — before any exclusion/ownership filtering runs)");
@@ -1190,19 +1190,19 @@ namespace FarmAnimalOwnershipProject
                     .ToList();
 
                 if (animals.Count > 0)
-                    combined.Add((rule, animals, "plugin"));
+                    combined.Add((rule, animals, "Plugin filename"));
             }
 
             foreach (var rule in settings.ExcludeCellRules)
             {
                 if (excludedCellsByRule.TryGetValue(rule, out var cells) && cells.Count > 0)
-                    combined.Add((rule, cells, "cell"));
+                    combined.Add((rule, cells, "Cell EditorID"));
             }
 
             foreach (var rule in settings.ExcludeLocTypeRules)
             {
                 if (excludedLocTypesByRule.TryGetValue(rule, out var names) && names.Count > 0)
-                    combined.Add((rule, names, "loctype"));
+                    combined.Add((rule, names, "LocType keyword EditorID"));
             }
 
             foreach (var term in settings.ExcludeNameTerms)
@@ -1213,7 +1213,7 @@ namespace FarmAnimalOwnershipProject
                     .ToList();
 
                 if (animals.Count > 0)
-                    combined.Add((term, animals, "name"));
+                    combined.Add((term, animals, "Base NPC EditorID"));
             }
 
             foreach (var entry in combined.OrderByDescending(e => e.Animals.Count))
@@ -1292,7 +1292,7 @@ namespace FarmAnimalOwnershipProject
             };
 
             if (settings.Verbose.ExclusionDetail)
-                summaryLines.Add(("Owned animals were excluded from voting by ExcludeOwnerNames", excludedOwnerVotesCount, false));
+                summaryLines.Add(("Owned animals excluded from voting by Owner EditorID terms", excludedOwnerVotesCount, false));
 
             foreach (var (label, count, showRaces) in summaryLines.OrderByDescending(l => l.Count))
             {
@@ -1310,7 +1310,7 @@ namespace FarmAnimalOwnershipProject
                                 .OrderByDescending(entry => entry.Value)
                                 .ThenBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
                                 .Select(entry => $"{entry.Key} ({entry.Value})"));
-                            raceLine += $"  [NPC EditorIDs: {editorIds}]";
+                            raceLine += $"  [Base NPC EditorIDs: {editorIds}]";
                         }
 
                         ConsoleWriteLine(raceLine);
@@ -1323,8 +1323,8 @@ namespace FarmAnimalOwnershipProject
         {
             PrintDivider();
             ConsoleWriteLine("Patching is complete! Scroll up to read a report on what was patched, skipped, and excluded.");
-            ConsoleWriteLine("A couple of notes on the summaries: In the General Summary there is typically a large overlap between no suitable owner and an unsuitable location, since they can both be true.");
-            ConsoleWriteLine("The Exclusion Summary displays the NPCs who would have been patched by the logic were it not for exclusion rules.");
+            ConsoleWriteLine("In the General Summary, animals counted as being in an unknown location are also counted as having no suitable owner.");
+            ConsoleWriteLine("The Exclusion Summary counts unowned race-matched NPCs filtered before owner selection.");
 
             if (settings.Verbose.PerPluginCounts)
                 ConsoleWriteLine("The \"didn't resolve as an NPC record\" count covers ALL placed NPCs, not just farm animals (race can't be checked until Base resolves) — a large number here is worth investigating (e.g. animals placed via a Leveled Actor list) but isn't itself a count of missed animals.");
