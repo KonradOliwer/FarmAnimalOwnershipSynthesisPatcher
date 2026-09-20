@@ -21,6 +21,31 @@ namespace FarmAnimalOwnershipProject
     }
 
 
+    public class VerboseSettings
+    {
+
+        [SynthesisSettingName("Placed NPCs seen, by plugin")]
+        [SynthesisTooltip("Lists every plugin the patcher saw ANY placed NPC from, and how many of those matched a farm-animal race — before any exclusion rule runs. Use this to check whether a mod's animals are reaching the patcher at all.")]
+        public bool PerPluginCounts { get; set; } = false;
+
+        [SynthesisSettingName("Skipped animals, by cell")]
+        [SynthesisTooltip("Lists the farm animals that were left unpatched because no suitable owner could be found, grouped by cell and plugin.")]
+        public bool SkippedAnimals { get; set; } = false;
+
+        [SynthesisSettingName("Exclusion detail (list animal names)")]
+        [SynthesisTooltip("Adds the individual animal names under each rule in the Exclusion Summary, instead of just a count.")]
+        public bool ExclusionDetail { get; set; } = false;
+
+        [SynthesisSettingName("Flag fuzzy faction matches")]
+        [SynthesisTooltip("Marks ownership that came from a loose name match rather than an exact one with '(fuzzy)'. Fuzzy matches are the likeliest source of a wrong owner, so this is worth turning on when checking results.")]
+        public bool FuzzyMatchDetail { get; set; } = false;
+
+        [SynthesisSettingName("Timing breakdown")]
+        [SynthesisTooltip("Prints how long each phase of the run took. Useful when the patcher feels slow on a large load order.")]
+        public bool Timing { get; set; } = false;
+    }
+
+
     [SynthesisObjectNameMember(nameof(PluginName))]
     public class PluginFactionOverrideEntry
     {
@@ -181,5 +206,9 @@ namespace FarmAnimalOwnershipProject
             new() { EditorID = "MorKhazgur", FactionEditorID = "TownMorKhazgurFaction" },
             new() { EditorID = "Narzulbur", FactionEditorID = "TownNarzulburFaction" },
         ];
+
+        [SynthesisSettingName("Verbose logging")]
+        [SynthesisTooltip("Extra diagnostic output, off by default. Turn these on when an animal wasn't patched and you need to find out why.")]
+        public VerboseSettings Verbose { get; set; } = new();
     }
 }

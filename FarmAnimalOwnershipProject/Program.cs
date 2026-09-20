@@ -4,9 +4,9 @@ using Mutagen.Bethesda.Plugins.Cache;
 using Mutagen.Bethesda.Plugins.Records;
 using Mutagen.Bethesda.Skyrim;
 using Mutagen.Bethesda.Synthesis;
-using Newtonsoft.Json;
 using Noggog;
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 
 
 namespace FarmAnimalOwnershipProject
@@ -14,32 +14,10 @@ namespace FarmAnimalOwnershipProject
     public class Program
     {
         // ------------------------------------------------------------------
-        // Settings load/save
+        // Settings
         // ------------------------------------------------------------------
 
-        // Without Replace, Json.NET appends deserialized list entries onto the defaults from the
-        // property initializers, duplicating every rule/override once a settings file exists.
-        private static readonly JsonSerializerSettings SettingsJsonOptions = new()
-        {
-            ObjectCreationHandling = ObjectCreationHandling.Replace,
-        };
-
-        public static Settings Load(string path)
-        {
-            if (string.IsNullOrEmpty(path) || !File.Exists(path))
-                return new Settings();
-            var json = File.ReadAllText(path);
-            return JsonConvert.DeserializeObject<Settings>(json, SettingsJsonOptions) ?? new Settings();
-        }
-
-        public void Save(string path)
-        {
-            var json = JsonConvert.SerializeObject(this, Formatting.Indented);
-            File.WriteAllText(path, json);
-        }
-
         static Lazy<Settings> LazySettings = new();
-        static Settings Settings => LazySettings.Value;
 
         // ------------------------------------------------------------------
         // Console output helpers
@@ -71,42 +49,16 @@ namespace FarmAnimalOwnershipProject
         // Small utility helpers
         // ------------------------------------------------------------------
 
-        // Adds an entry to a "skipped animals by cell" dictionary, creating the list if needed.
-        private static void AddSkip(
-            Dictionary<string, List<(string Animal, string Plugin, string Reason)>> dict,
-            string animal,
-            string plugin,
-            string cellEdid,
-            string reason)
+        private static bool MatchesPattern(string pattern, string value)
         {
-            string key = cellEdid ?? "(unknown cell)";
+            if (string.IsNullOrEmpty(pattern) || string.IsNullOrEmpty(value))
+                return false;
 
-            if (!dict.TryGetValue(key, out var list))
-            {
-                list = [];
-                dict[key] = list;
-            }
+            if (!pattern.Contains('*') && !pattern.Contains('?'))
+                return value.Contains(pattern, StringComparison.OrdinalIgnoreCase);
 
-            list.Add((animal, plugin, reason));
-        }
-
-        // Partial-match (substring) plugin exclusion.
-        private static bool IsPluginExcluded(string pluginName)
-        {
-            return Settings.ExcludePlugins.Any(pattern =>
-                pluginName.Contains(pattern, StringComparison.OrdinalIgnoreCase));
-        }
-
-        // Partial-match (substring) cell exclusion.
-        private static bool RuleMatchesCell(string rule, string cellEdid)
-        {
-            return cellEdid.Contains(rule, StringComparison.OrdinalIgnoreCase);
-        }
-
-        // Partial-match (substring) plugin rule, used only in the summary/report section.
-        private static bool RuleMatchesPlugin(string rule, string pluginName)
-        {
-            return pluginName.Contains(rule, StringComparison.OrdinalIgnoreCase);
+            var anchoredGlob = "^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+            return Regex.IsMatch(value, anchoredGlob, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         }
 
         // ------------------------------------------------------------------
@@ -142,16 +94,15 @@ namespace FarmAnimalOwnershipProject
             return true;
         }
 
-        // Resolves an override's faction EditorID to an actual faction record (exact first, then fuzzy).
-        private static IFactionGetter? ResolveOverrideFaction(string factionEdid, Dictionary<string, IFactionGetter> factionsByEdid)
+        private static (IFactionGetter? Faction, bool WasFuzzy) ResolveOverrideFaction(string factionEdid, Dictionary<string, IFactionGetter> factionsByEdid)
         {
             if (string.IsNullOrWhiteSpace(factionEdid))
-                return null;
+                return (null, false);
 
             if (factionsByEdid.TryGetValue(factionEdid, out var exact))
-                return exact;
+                return (exact, false);
 
-            return TryFuzzyFactionMatch(factionEdid, factionsByEdid);
+            return (TryFuzzyFactionMatch(factionEdid, factionsByEdid), true);
         }
 
         // Generates root candidates from an EditorID by stripping trailing digits (e.g. "Name01" -> "Name").
@@ -269,24 +220,6 @@ namespace FarmAnimalOwnershipProject
             return name; // nothing left to strip
         }
 
-        // Resolves the owner faction for an animal at the given location/cell.
-        //
-        // Precedence: naming conventions (cell, then location) -> manual faction match (exact)
-        // -> manual faction match (partial). Naming conventions run first because they're the
-        // most reliable general-purpose signal; manual faction matches exist to correct or fill
-        // in the cases naming conventions can't reach (non-standard faction names), so they only
-        // get a turn once naming has had its shot. Partial matches still go LAST within that so
-        // a broad catch-all key like "Riften" can't hijack e.g. Snow-Shod Farm (whose location
-        // EDID contains "Riften") away from a more specific exact match or naming match.
-        // Highest-priority check (tried before naming conventions): instead of searching every faction
-        // in the load order, this restricts the search to factions ORIGINALLY DEFINED BY the same
-        // plugin that placed the animal (e.g. a farm mod's own "Soc_MyFarm_Whiterun" faction for an
-        // animal that same mod placed in WhiterunExterior01), then fuzzy-matches the cell/location
-        // EditorID's root against those plugin-local factions' EditorIDs. This is a direct port of the
-        // same check added to the sister Valuables/Harvestables patchers — flagged there as possibly a
-        // weaker fit here, since farm-animal mods often name their locations after the FARM rather than
-        // reusing a vanilla town name, which is exactly the case TryGetTownFaction's naming-convention
-        // checks below already handle well. Worth evaluating against real load orders either way.
         private static (IFactionGetter? Faction, string? Reason) TryGetPluginLocalFactionMatch(
             string pluginName,
             ILocationGetter? location,
@@ -318,7 +251,7 @@ namespace FarmAnimalOwnershipProject
             return (null, null);
         }
 
-        private static (IFactionGetter? Faction, string? Reason) TryGetTownFaction(
+        private static (IFactionGetter? Faction, string? Reason, bool WasFuzzy) TryGetTownFaction(
             ILocationGetter? location,
             Dictionary<string, IFactionGetter> factionsByEdid,
             ICellGetter? cell)
@@ -336,7 +269,7 @@ namespace FarmAnimalOwnershipProject
                     extraRoots: GetTownRootCandidates(cell.EditorID),
                     fuzzyRequiredPrefix: "Town");
                 if (cellTownFactionResult.Faction != null)
-                    return (cellTownFactionResult.Faction, $"Cell-Town faction match");
+                    return (cellTownFactionResult.Faction, "Cell-Town faction match", cellTownFactionResult.WasFuzzy);
 
                 var cellFarmFactionResult = TryFindFactionByConvention(
                     cell.EditorID,
@@ -345,7 +278,7 @@ namespace FarmAnimalOwnershipProject
                     factionsByEdid,
                     extraRoots: GetTownRootCandidates(cell.EditorID));
                 if (cellFarmFactionResult.Faction != null)
-                    return (cellFarmFactionResult.Faction, $"Cell-Name faction match");
+                    return (cellFarmFactionResult.Faction, "Cell-Name faction match", cellFarmFactionResult.WasFuzzy);
 
             }
 
@@ -364,7 +297,7 @@ namespace FarmAnimalOwnershipProject
                             : location.EditorID),
                     fuzzyRequiredPrefix: "Town");
                 if (townFactionResult.Faction != null)
-                    return (townFactionResult.Faction, $"Location-Town faction match");
+                    return (townFactionResult.Faction, "Location-Town faction match", townFactionResult.WasFuzzy);
 
                 // <Name>FarmFaction
                 var farmFactionResult = TryFindFactionByConvention(
@@ -374,7 +307,7 @@ namespace FarmAnimalOwnershipProject
                     factionsByEdid,
                     fuzzyRequiredSuffix: "FarmFaction");
                 if (farmFactionResult.Faction != null)
-                    return (farmFactionResult.Faction, $"Location-Farm faction match");
+                    return (farmFactionResult.Faction, "Location-Farm faction match", farmFactionResult.WasFuzzy);
 
                 // <Name>MillFaction, with an extra fallback against the cell's EditorID roots.
                 // This also catches sawmills: "SawmillLocation" ends with "MillLocation", so
@@ -389,7 +322,7 @@ namespace FarmAnimalOwnershipProject
                     extraRoots: GetRootsFromEditorId(cell?.EditorID),
                     fuzzyRequiredSuffix: "MillFaction");
                 if (millFactionResult.Faction != null)
-                    return (millFactionResult.Faction, $"Location-Mill faction match");
+                    return (millFactionResult.Faction, "Location-Mill faction match", millFactionResult.WasFuzzy);
             }
 
             // Manual faction match: exact match.
@@ -397,9 +330,9 @@ namespace FarmAnimalOwnershipProject
             {
                 if (edid != null && ManualFactionMatches.TryGetValue(edid, out var overrideEdid))
                 {
-                    var faction = ResolveOverrideFaction(overrideEdid, factionsByEdid);
+                    var (faction, wasFuzzy) = ResolveOverrideFaction(overrideEdid, factionsByEdid);
                     if (faction != null)
-                        return (faction, "Manual faction match (exact)");
+                        return (faction, "Manual faction match (exact)", wasFuzzy);
                 }
             }
 
@@ -413,19 +346,19 @@ namespace FarmAnimalOwnershipProject
                 {
                     if (TryFindPartialManualMatch(candidate, out var overrideEdid))
                     {
-                        var faction = ResolveOverrideFaction(overrideEdid, factionsByEdid);
+                        var (faction, wasFuzzy) = ResolveOverrideFaction(overrideEdid, factionsByEdid);
                         if (faction != null)
-                            return (faction, "Manual faction match (partial)");
+                            return (faction, "Manual faction match (partial)", wasFuzzy);
                     }
                 }
             }
 
-            return (null, null);
+            return (null, null, false);
         }
 
         // Finds a faction for animals placed by a specific plugin (Settings.PluginFactionOverrides,
         // partial plugin-name matching). First matching entry that resolves to a real faction wins.
-        private static (IFactionGetter? Faction, string? Reason) TryGetPluginFactionOverride(
+        private static (IFactionGetter? Faction, string? Reason, bool WasFuzzy) TryGetPluginFactionOverride(
             string pluginName,
             Settings settings,
             Dictionary<string, IFactionGetter> factionsByEdid)
@@ -435,15 +368,15 @@ namespace FarmAnimalOwnershipProject
                 if (string.IsNullOrWhiteSpace(entry.PluginName) || string.IsNullOrWhiteSpace(entry.FactionEditorID))
                     continue;
 
-                if (!pluginName.Contains(entry.PluginName.Trim(), StringComparison.OrdinalIgnoreCase))
+                if (!MatchesPattern(entry.PluginName.Trim(), pluginName))
                     continue;
 
-                var faction = ResolveOverrideFaction(entry.FactionEditorID.Trim(), factionsByEdid);
+                var (faction, wasFuzzy) = ResolveOverrideFaction(entry.FactionEditorID.Trim(), factionsByEdid);
                 if (faction != null)
-                    return (faction, "Plugin-Name faction match");
+                    return (faction, "Plugin-Name faction match", wasFuzzy);
             }
 
-            return (null, null);
+            return (null, null, false);
         }
 
         // Caches the resolved winning ICellGetter by cell FormKey. The chain-walk to find the immediate
@@ -488,11 +421,6 @@ namespace FarmAnimalOwnershipProject
         // Pass 2 in RunPatch)
         // ------------------------------------------------------------------
 
-        // Picks the most common owner FormKey from a cell's tally. Ties are broken by preferring
-        // a Faction owner over an NPC owner, if one of the tied candidates is a Faction; if the tie
-        // is between owners of the same kind (or the Faction check can't resolve either), the first
-        // encountered candidate wins, deterministically (Dictionary enumeration order is stable for
-        // a given set of insertions within a single run).
         private static FormKey PickMajorityOwner(
             Dictionary<FormKey, int> ownerCounts,
             ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache)
@@ -530,7 +458,7 @@ namespace FarmAnimalOwnershipProject
         {
             var overallStopwatch = Stopwatch.StartNew();
 
-            var settings = LoadRunSettings(state);
+            var settings = LazySettings.Value;
             PopulateManualFactionMatches(settings);
             ResolvedCellCache.Clear();
 
@@ -568,7 +496,6 @@ namespace FarmAnimalOwnershipProject
             }
             factionLookupStopwatch.Stop();
 
-            var seen = new HashSet<FormKey>();
             var ownerEdidCache = new Dictionary<FormKey, string?>();
 
             // Caches the "is this base NPC record a farm-animal race, and what's its label/race info?"
@@ -577,7 +504,7 @@ namespace FarmAnimalOwnershipProject
             // placed NPC instance with zero caching, even though many placed animals routinely share the
             // exact same base NPC template (e.g. one "Cow01" record placed hundreds of times across the
             // world). Caching by FormKey means each unique base NPC template only gets resolved once.
-            var npcBaseCache = new Dictionary<FormKey, (bool Resolved, string AnimalLabel, string RaceEdid, string DisplayRace, bool IsFarmAnimalRace)>();
+            var npcBaseCache = new Dictionary<FormKey, (bool Resolved, string AnimalLabel, string DisplayRace, bool IsFarmAnimalRace)>();
 
             // Tallies, keyed by the containing cell's FormKey — built in Pass 1, consulted in
             // Pass 2 only as a fallback once naming conventions, manual faction matches, and
@@ -603,7 +530,6 @@ namespace FarmAnimalOwnershipProject
             var excludedCellsByRule = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var excludedLocTypesByRule = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var excludedNamesByRule = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-            var animalRaceCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var patchedRaceCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
             // Diagnostics: which plugins are contributing placed NPCs at all (regardless of race),
@@ -619,12 +545,6 @@ namespace FarmAnimalOwnershipProject
             int excludedCount = 0;
             int excludedOwnerVotesCount = 0;
             int unresolvedNpcBaseCount = 0;
-
-            var unknownSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var missingFactionSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var patchedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var alreadyOwnedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var excludedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             PrintShortDivider();
             ConsoleWriteLine("SCANNING...".PadLeft(35));
@@ -646,9 +566,6 @@ namespace FarmAnimalOwnershipProject
                 // Cells without an EditorID (e.g. many exterior cells) are treated as unknown.
                 var cellEdid = containingCell?.EditorID ?? "Unknown cell";
 
-                if (!seen.Add(placedNpc.FormKey))
-                    continue;
-
                 // Classification (resolve + race check) is cached by base NPC FormKey — see
                 // npcBaseCache's declaration above for why this matters. The counting below still
                 // happens once per PLACED INSTANCE using the cached classification, exactly as before.
@@ -659,24 +576,30 @@ namespace FarmAnimalOwnershipProject
                     var npc = placedNpc.Base.TryResolve(state.LinkCache);
                     if (npc == null)
                     {
-                        npcInfo = (Resolved: false, AnimalLabel: "", RaceEdid: "", DisplayRace: "", IsFarmAnimalRace: false);
+                        npcInfo = (Resolved: false, AnimalLabel: "", DisplayRace: "", IsFarmAnimalRace: false);
                     }
                     else
                     {
                         var resolvedAnimalLabel = npc.EditorID ?? "UnknownNPC";
                         var resolvedRaceEdid = npc.Race.TryResolve(state.LinkCache)?.EditorID ?? "UnknownRace";
                         bool resolvedIsFarmAnimalRace = settings.IncludeRaceTerms.Any(term =>
-                            resolvedRaceEdid.Contains(term, StringComparison.OrdinalIgnoreCase));
+                            MatchesPattern(term, resolvedRaceEdid));
                         var resolvedDisplayRace = resolvedRaceEdid.EndsWith("Race", StringComparison.OrdinalIgnoreCase)
                             ? resolvedRaceEdid[..^"Race".Length]
                             : resolvedRaceEdid;
 
-                        npcInfo = (Resolved: true, AnimalLabel: resolvedAnimalLabel, RaceEdid: resolvedRaceEdid, DisplayRace: resolvedDisplayRace, IsFarmAnimalRace: resolvedIsFarmAnimalRace);
+                        npcInfo = (Resolved: true, AnimalLabel: resolvedAnimalLabel, DisplayRace: resolvedDisplayRace, IsFarmAnimalRace: resolvedIsFarmAnimalRace);
                     }
                     npcResolveStopwatch.Stop();
 
                     npcBaseCache[baseFormKey] = npcInfo;
                 }
+
+                // Get the actual mod file providing this winning override in the load order
+                string pluginName = context.ModKey.FileName;
+
+                allPlacedNpcCountsByPlugin.TryGetValue(pluginName, out var allCount);
+                allPlacedNpcCountsByPlugin[pluginName] = allCount + 1;
 
                 if (!npcInfo.Resolved)
                 {
@@ -685,12 +608,6 @@ namespace FarmAnimalOwnershipProject
                 }
 
                 var animalLabel = npcInfo.AnimalLabel;
-
-                // Get the actual mod file providing this winning override in the load order
-                string pluginName = context.ModKey.FileName;
-
-                allPlacedNpcCountsByPlugin.TryGetValue(pluginName, out var allCount);
-                allPlacedNpcCountsByPlugin[pluginName] = allCount + 1;
 
                 // Race check first: only farm-animal races are candidates at all.
                 if (!npcInfo.IsFarmAnimalRace)
@@ -701,13 +618,9 @@ namespace FarmAnimalOwnershipProject
 
                 var displayRace = npcInfo.DisplayRace;
 
-                animalRaceCounts.TryGetValue(displayRace, out var raceCount);
-                animalRaceCounts[displayRace] = raceCount + 1;
-
                 if (!placedNpc.Owner.IsNull)
                 {
                     alreadyOwnedCount++;
-                    alreadyOwnedSet.Add(animalLabel);
 
                     var ownerFormKeyNullable = placedNpc.Owner.FormKeyNullable;
                     if (ownerFormKeyNullable is { } ownerFormKey && containingCell != null)
@@ -721,7 +634,7 @@ namespace FarmAnimalOwnershipProject
                         }
 
                         bool ownerIsExcluded = ownerEdid != null
-                            && settings.ExcludeOwnerNames.Any(term => ownerEdid.Contains(term, StringComparison.OrdinalIgnoreCase));
+                            && settings.ExcludeOwnerNames.Any(term => MatchesPattern(term, ownerEdid));
 
                         if (!ownerIsExcluded)
                         {
@@ -786,7 +699,7 @@ namespace FarmAnimalOwnershipProject
                     string? cellRuleMatched = null;
                     foreach (var rule in settings.ExcludeCellRules)
                     {
-                        if (RuleMatchesCell(rule, cellEdid))
+                        if (MatchesPattern(rule, cellEdid))
                         {
                             cellRuleExcluded = true;
                             cellRuleMatched = rule;
@@ -812,7 +725,7 @@ namespace FarmAnimalOwnershipProject
                         {
                             foreach (var rule in settings.ExcludeLocTypeRules)
                             {
-                                if (keywordEdids.Any(k => k.Contains(rule, StringComparison.OrdinalIgnoreCase)))
+                                if (keywordEdids.Any(k => MatchesPattern(rule, k)))
                                 {
                                     locTypeExcluded = true;
                                     locTypeRuleMatched = rule;
@@ -833,7 +746,6 @@ namespace FarmAnimalOwnershipProject
 
                     cellList.Add(animalLabel);
                     excludedCount++;
-                    excludedSet.Add(animalLabel);
                     continue;
                 }
 
@@ -844,13 +756,12 @@ namespace FarmAnimalOwnershipProject
 
                     list.Add(animalLabel);
                     excludedCount++;
-                    excludedSet.Add(animalLabel);
                     continue;
                 }
 
                 if (!pluginExclusionCache.TryGetValue(pluginName, out var pluginExcluded))
                 {
-                    pluginExcluded = IsPluginExcluded(pluginName);
+                    pluginExcluded = settings.ExcludePlugins.Any(pattern => MatchesPattern(pattern, pluginName));
                     pluginExclusionCache[pluginName] = pluginExcluded;
                 }
 
@@ -861,12 +772,11 @@ namespace FarmAnimalOwnershipProject
 
                     list.Add(animalLabel);
                     excludedCount++;
-                    excludedSet.Add(animalLabel);
                     continue;
                 }
 
                 var matchedNameTerm = settings.ExcludeNameTerms
-                    .FirstOrDefault(term => animalLabel.Contains(term, StringComparison.OrdinalIgnoreCase));
+                    .FirstOrDefault(term => MatchesPattern(term, animalLabel));
                 if (matchedNameTerm != null)
                 {
                     if (!excludedNamesByRule.TryGetValue(matchedNameTerm, out var list))
@@ -874,7 +784,6 @@ namespace FarmAnimalOwnershipProject
 
                     list.Add(animalLabel);
                     excludedCount++;
-                    excludedSet.Add(animalLabel);
                     continue;
                 }
 
@@ -903,12 +812,14 @@ namespace FarmAnimalOwnershipProject
                 var pluginLocalResult = TryGetPluginLocalFactionMatch(pluginName, location, containingCell, factionsByPlugin);
                 IOwnerGetter? ownerRecord = pluginLocalResult.Faction;
                 string? ownerReason = pluginLocalResult.Reason;
+                bool ownerWasFuzzy = false;
 
                 if (ownerRecord == null)
                 {
                     var townFactionResult = TryGetTownFaction(location, factionsByEdid, containingCell);
                     ownerRecord = townFactionResult.Faction;
                     ownerReason = townFactionResult.Reason;
+                    ownerWasFuzzy = townFactionResult.WasFuzzy;
                 }
 
                 if (ownerRecord == null)
@@ -918,6 +829,7 @@ namespace FarmAnimalOwnershipProject
                     {
                         ownerRecord = pluginOverrideResult.Faction;
                         ownerReason = pluginOverrideResult.Reason;
+                        ownerWasFuzzy = pluginOverrideResult.WasFuzzy;
                     }
                 }
 
@@ -950,7 +862,6 @@ namespace FarmAnimalOwnershipProject
                 if (ownerRecord == null)
                 {
                     missingFactionCount++;
-                    missingFactionSet.Add(animalLabel);
 
                     var reason = hasNoLocationData
                         ? "No suitable owner, No suitable location"
@@ -959,10 +870,12 @@ namespace FarmAnimalOwnershipProject
                     if (hasNoLocationData)
                     {
                         unknownCount++;
-                        unknownSet.Add(animalLabel);
                     }
 
-                    AddSkip(skippedAnimalsByCell, animalLabel, pluginName, cellDisplayLabel, reason);
+                    if (!skippedAnimalsByCell.TryGetValue(cellDisplayLabel, out var skippedList))
+                        skippedAnimalsByCell[cellDisplayLabel] = skippedList = [];
+
+                    skippedList.Add((animalLabel, pluginName, reason));
                     continue;
                 }
 
@@ -970,7 +883,6 @@ namespace FarmAnimalOwnershipProject
                 patchNpc.Owner.SetTo(ownerRecord);
                 patchNpc.FactionRank = rankToApply;
                 patchedCount++;
-                patchedSet.Add(animalLabel);
 
                 patchedRaceCounts.TryGetValue(displayRace, out var patchedRaceCount);
                 patchedRaceCounts[displayRace] = patchedRaceCount + 1;
@@ -979,8 +891,11 @@ namespace FarmAnimalOwnershipProject
                     patchedAnimalsByCell[cellDisplayLabel] = patchedList = [];
 
                 var ownerLabel = (ownerRecord as IMajorRecordGetter)?.EditorID ?? "Unknown owner";
+                var reasonLabel = ownerReason ?? "unknown";
+                if (ownerWasFuzzy && settings.Verbose.FuzzyMatchDetail)
+                    reasonLabel += " (fuzzy)";
 
-                patchedList.Add((animalLabel, pluginName, ownerLabel, ownerReason ?? "unknown"));
+                patchedList.Add((animalLabel, pluginName, ownerLabel, reasonLabel));
             }
             pass2Stopwatch.Stop();
             overallStopwatch.Stop();
@@ -1004,23 +919,20 @@ namespace FarmAnimalOwnershipProject
                 excludedOwnerVotesCount,
                 unresolvedNpcBaseCount);
 
-            // Timing instrumentation — kept in place (Stopwatches above still run; the cost is
-            // negligible) for future debugging, but the printed breakdown is disabled by default.
-            // Uncomment the call below to re-enable the "TIMING BREAKDOWN" console section.
-            // PrintTimingReport(
-            //     overallStopwatch,
-            //     factionLookupStopwatch,
-            //     pass1Stopwatch,
-            //     pass2Stopwatch,
-            //     findCellStopwatch,
-            //     npcResolveStopwatch,
-            //     npcBaseCache.Count,
-            //     candidates.Count);
+            if (settings.Verbose.Timing)
+            {
+                PrintTimingReport(
+                    overallStopwatch,
+                    factionLookupStopwatch,
+                    pass1Stopwatch,
+                    pass2Stopwatch,
+                    findCellStopwatch,
+                    npcResolveStopwatch,
+                    npcBaseCache.Count,
+                    candidates.Count);
+            }
         }
 
-        // Prints a breakdown of where the run's time actually went. Temporary diagnostic output —
-        // safe to trim once the bottleneck is identified, but cheap enough (a handful of Stopwatches)
-        // to leave in indefinitely if useful for future tuning on other load orders.
         private static void PrintTimingReport(
             Stopwatch overall,
             Stopwatch factionLookup,
@@ -1049,52 +961,6 @@ namespace FarmAnimalOwnershipProject
             ConsoleWriteLine($"TOTAL:                          {overall.ElapsedMilliseconds,8} ms");
 
             PrintDivider();
-        }
-
-        // Loads (or generates) the settings file used for this run.
-        private static Settings LoadRunSettings(IPatcherState<ISkyrimMod, ISkyrimModGetter> state)
-        {
-            string[] tryNames = ["Settings.json", "settings.json"];
-            string? configContent = null;
-
-            foreach (var name in tryNames)
-            {
-                try
-                {
-                    configContent = state.RetrieveConfigFile(name);
-                    break;
-                }
-                catch (FileNotFoundException)
-                {
-                    // try next name
-                }
-            }
-
-            if (configContent is null)
-            {
-                var defaultSettings = LazySettings.Value;
-                configContent = JsonConvert.SerializeObject(defaultSettings, Formatting.Indented);
-                try
-                {
-                    var outPath = Path.Combine(Environment.CurrentDirectory, tryNames[0]);
-                    File.WriteAllText(outPath, configContent);
-                    ConsoleWriteLine($"Generated default config file: {tryNames[0]}");
-                }
-                catch (IOException ioEx)
-                {
-                    ConsoleWriteLine($"WARNING: Failed to write default config file: {ioEx.Message}");
-                }
-            }
-
-            try
-            {
-                return JsonConvert.DeserializeObject<Settings>(configContent!, SettingsJsonOptions) ?? LazySettings.Value;
-            }
-            catch (JsonException)
-            {
-                ConsoleWriteLine("WARNING: Could not parse Settings File; using defaults.");
-                return LazySettings.Value;
-            }
         }
 
         // Populates the ManualFactionMatches lookup from Settings.ManualFactionMatches for this run.
@@ -1146,20 +1012,22 @@ namespace FarmAnimalOwnershipProject
         {
             var totalPatched = patchedAnimalsByCell.Values.SelectMany(v => v).Count();
 
-            // Debugging only //
-            // _lastWasDivider = false;
-            // PrintShortDivider();
-            // ConsoleWriteLine("PLACED NPCs SEEN, BY ORIGIN PLUGIN".PadLeft(52));
-            // PrintShortDivider();
-            // ConsoleWriteLine("(diagnostic: shows every plugin the patcher saw ANY placed NPC from, and how many of");
-            // ConsoleWriteLine("those race-matched as farm animals — before any exclusion/ownership filtering runs)");
-            // PrintShortDivider();
-            //
-            // foreach (var kvp in allPlacedNpcCountsByPlugin.OrderByDescending(k => k.Value))
-            // {
-            //     raceMatchedCountsByPlugin.TryGetValue(kvp.Key, out var raceMatched);
-            //     ConsoleWriteLine($"{kvp.Key}   ({kvp.Value} placed NPCs total, {raceMatched} race-matched as farm animals)");
-            // }
+            if (settings.Verbose.PerPluginCounts)
+            {
+                _lastWasDivider = false;
+                PrintShortDivider();
+                ConsoleWriteLine("PLACED NPCs SEEN, BY PLUGIN".PadLeft(46));
+                PrintShortDivider();
+                ConsoleWriteLine("(diagnostic: shows every plugin the patcher saw ANY placed NPC from, and how many of");
+                ConsoleWriteLine("those race-matched as farm animals — before any exclusion/ownership filtering runs)");
+                PrintShortDivider();
+
+                foreach (var kvp in allPlacedNpcCountsByPlugin.OrderByDescending(k => k.Value))
+                {
+                    raceMatchedCountsByPlugin.TryGetValue(kvp.Key, out var raceMatched);
+                    ConsoleWriteLine($"{kvp.Key}   ({kvp.Value} placed NPCs total, {raceMatched} race-matched as farm animals)");
+                }
+            }
 
             PrintDivider();
 
@@ -1215,88 +1083,99 @@ namespace FarmAnimalOwnershipProject
                 ConsoleWriteLine($"{entry.Count} farm animals were assigned an owner via: {entry.Reason}");
             }
 
-            // var totalSkipped = skippedAnimalsByCell.Values.SelectMany(v => v).Count();
-            //
-            // _lastWasDivider = false;
-            // PrintShortDivider();
-            // ConsoleWriteLine("SKIPPED BY CELL".PadLeft(35));
-            // ConsoleWriteLine($"Total skipped: {totalSkipped}".PadLeft(36));
-            // PrintShortDivider();
-            //
-            // foreach (var kvp in skippedAnimalsByCell.OrderByDescending(k => k.Value.Count))
-            // {
-            //     var cellLabel = kvp.Key;
-            //     var animals = kvp.Value;
-            //
-            //     ConsoleWriteLine($"{cellLabel}   ({animals.Count} skipped)");
-            //
-            //     var byPlugin = animals
-            //         .GroupBy(a => a.Plugin)
-            //         .Select(g => new { Plugin = g.Key, Count = g.Count(), Animals = g.ToList() })
-            //         .OrderByDescending(p => p.Count);
-            //
-            //     foreach (var pluginGroup in byPlugin)
-            //     {
-            //         ConsoleWriteLine($"     [{pluginGroup.Plugin}] ({pluginGroup.Count})");
-            //
-            //         var byAnimal = pluginGroup.Animals
-            //             .GroupBy(a => new { a.Animal, a.Reason })
-            //             .Select(g => new { g.Key.Animal, g.Key.Reason, Count = g.Count() })
-            //             .OrderByDescending(a => a.Count);
-            //
-            //         foreach (var entry in byAnimal)
-            //         {
-            //             ConsoleWriteLine($"          {entry.Count} {entry.Animal}   Returned: {entry.Reason}");
-            //         }
-            //     }
-            //
-            //     PrintDivider();
-            // }
+            if (settings.Verbose.SkippedAnimals)
+            {
+                var totalSkipped = skippedAnimalsByCell.Values.SelectMany(v => v).Count();
+
+                _lastWasDivider = false;
+                PrintShortDivider();
+                ConsoleWriteLine("SKIPPED BY CELL".PadLeft(35));
+                ConsoleWriteLine($"Total skipped: {totalSkipped}".PadLeft(36));
+                PrintShortDivider();
+
+                foreach (var kvp in skippedAnimalsByCell.OrderByDescending(k => k.Value.Count))
+                {
+                    var cellLabel = kvp.Key;
+                    var animals = kvp.Value;
+
+                    ConsoleWriteLine($"{cellLabel}   ({animals.Count} skipped)");
+
+                    var byPlugin = animals
+                        .GroupBy(a => a.Plugin)
+                        .Select(g => new { Plugin = g.Key, Count = g.Count(), Animals = g.ToList() })
+                        .OrderByDescending(p => p.Count);
+
+                    foreach (var pluginGroup in byPlugin)
+                    {
+                        ConsoleWriteLine($"     [{pluginGroup.Plugin}] ({pluginGroup.Count})");
+
+                        var byAnimal = pluginGroup.Animals
+                            .GroupBy(a => new { a.Animal, a.Reason })
+                            .Select(g => new { g.Key.Animal, g.Key.Reason, Count = g.Count() })
+                            .OrderByDescending(a => a.Count);
+
+                        foreach (var entry in byAnimal)
+                        {
+                            ConsoleWriteLine($"          {entry.Count} {entry.Animal}   Returned: {entry.Reason}");
+                        }
+                    }
+
+                    PrintDivider();
+                }
+            }
 
             _lastWasDivider = false;
             PrintShortDivider();
             ConsoleWriteLine("EXCLUSION SUMMARY".PadLeft(37));
             PrintShortDivider();
 
-            var combined = new List<(string Rule, int Count, string Type)>();
+            var combined = new List<(string Rule, List<string> Animals, string Type)>();
 
             foreach (var rule in settings.ExcludePlugins)
             {
-                int count = excludedAnimalsByPlugin
-                    .Where(kv => RuleMatchesPlugin(rule, kv.Key))
+                var animals = excludedAnimalsByPlugin
+                    .Where(kv => MatchesPattern(rule, kv.Key))
                     .SelectMany(kv => kv.Value)
-                    .Count();
+                    .ToList();
 
-                if (count > 0)
-                    combined.Add((rule, count, "plugin"));
+                if (animals.Count > 0)
+                    combined.Add((rule, animals, "plugin"));
             }
 
             foreach (var rule in settings.ExcludeCellRules)
             {
                 if (excludedCellsByRule.TryGetValue(rule, out var cells) && cells.Count > 0)
-                    combined.Add((rule, cells.Count, "cell"));
+                    combined.Add((rule, cells, "cell"));
             }
 
             foreach (var rule in settings.ExcludeLocTypeRules)
             {
                 if (excludedLocTypesByRule.TryGetValue(rule, out var names) && names.Count > 0)
-                    combined.Add((rule, names.Count, "loctype"));
+                    combined.Add((rule, names, "loctype"));
             }
 
             foreach (var term in settings.ExcludeNameTerms)
             {
-                int count = excludedNamesByRule
-                    .Where(kvp => kvp.Key.Contains(term, StringComparison.OrdinalIgnoreCase))
+                var animals = excludedNamesByRule
+                    .Where(kvp => MatchesPattern(term, kvp.Key))
                     .SelectMany(kvp => kvp.Value)
-                    .Count();
+                    .ToList();
 
-                if (count > 0)
-                    combined.Add((term, count, "name"));
+                if (animals.Count > 0)
+                    combined.Add((term, animals, "name"));
             }
 
-            foreach (var entry in combined.OrderByDescending(e => e.Count))
+            foreach (var entry in combined.OrderByDescending(e => e.Animals.Count))
             {
-                ConsoleWriteLine($"The rule: {entry.Rule} ({entry.Type}) excluded {entry.Count} animals");
+                ConsoleWriteLine($"The rule: {entry.Rule} ({entry.Type}) excluded {entry.Animals.Count} animals");
+
+                if (!settings.Verbose.ExclusionDetail)
+                    continue;
+
+                foreach (var group in entry.Animals.GroupBy(a => a, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()))
+                {
+                    ConsoleWriteLine($"     {group.Count()} x {group.Key}");
+                }
             }
 
             _lastWasDivider = false;
@@ -1308,12 +1187,14 @@ namespace FarmAnimalOwnershipProject
             {
                 ("Farm animals have been assigned owners", patchedCount, true),
                 ("Farm animals were already owned", alreadyOwnedCount, false),
-            //  ("Owned animals were excluded from voting by ExcludeOwnerNames", excludedOwnerVotesCount, false),
                 ("Farm animals had no suitable owner", missingFactionCount, false),
                 ("Farm animals were in an unknown location", unknownCount, false),
                 ("Farm animals were excluded by rules", excludedCount, false),
                 ("Placed NPCs (of any kind) didn't resolve as an NPC record", unresolvedNpcBaseCount, false),
             };
+
+            if (settings.Verbose.ExclusionDetail)
+                summaryLines.Add(("Owned animals were excluded from voting by ExcludeOwnerNames", excludedOwnerVotesCount, false));
 
             foreach (var (label, count, showRaces) in summaryLines.OrderByDescending(l => l.Count))
             {
@@ -1330,9 +1211,12 @@ namespace FarmAnimalOwnershipProject
 
             PrintDivider();
             ConsoleWriteLine("Patching is complete! Scroll up to read a report on what was patched, skipped, and excluded.");
-            //  ConsoleWriteLine("A couple of notes on the summaries: In the General Summary there is typically a large overlap between no suitable owner and an unsuitable location, since they can both be true.");
-            //  ConsoleWriteLine("The Exclusion Summary displays the NPCs who would have been patched by the logic were it not for exclusion rules.");
-            //  ConsoleWriteLine("The \"Base didn't resolve as an NPC record\" count covers ALL placed NPCs, not just farm animals (race can't be checked until Base resolves) — a large number here is worth investigating (e.g. animals placed via a Leveled Actor list) but isn't itself a count of missed animals.");
+            ConsoleWriteLine("A couple of notes on the summaries: In the General Summary there is typically a large overlap between no suitable owner and an unsuitable location, since they can both be true.");
+            ConsoleWriteLine("The Exclusion Summary displays the NPCs who would have been patched by the logic were it not for exclusion rules.");
+
+            if (settings.Verbose.PerPluginCounts)
+                ConsoleWriteLine("The \"didn't resolve as an NPC record\" count covers ALL placed NPCs, not just farm animals (race can't be checked until Base resolves) — a large number here is worth investigating (e.g. animals placed via a Leveled Actor list) but isn't itself a count of missed animals.");
+
             PrintDivider();
         }
 
