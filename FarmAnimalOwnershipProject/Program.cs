@@ -454,6 +454,12 @@ namespace FarmAnimalOwnershipProject
         // Main patching pass
         // ------------------------------------------------------------------
 
+        private sealed class PatchedRaceSummary
+        {
+            public int Count { get; set; }
+            public Dictionary<string, int>? NpcEditorIdCounts { get; set; }
+        }
+
         public static void RunPatch(IPatcherState<ISkyrimMod, ISkyrimModGetter> state)
         {
             var overallStopwatch = Stopwatch.StartNew();
@@ -531,7 +537,7 @@ namespace FarmAnimalOwnershipProject
             var excludedLocTypesByRule = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var excludedNamesByRule = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var excludedDetails = new List<(string Animal, string Race, string Cell, string Plugin, string Rule, string RuleType)>();
-            var patchedRaceCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var patchedRaces = new Dictionary<string, PatchedRaceSummary>(StringComparer.OrdinalIgnoreCase);
 
             // Diagnostics: which plugins are contributing placed NPCs at all (regardless of race),
             // and which are contributing race-matched farm animals specifically. Answers "are my
@@ -879,8 +885,16 @@ namespace FarmAnimalOwnershipProject
                 patchNpc.FactionRank = rankToApply;
                 patchedCount++;
 
-                patchedRaceCounts.TryGetValue(displayRace, out var patchedRaceCount);
-                patchedRaceCounts[displayRace] = patchedRaceCount + 1;
+                if (!patchedRaces.TryGetValue(displayRace, out var raceSummary))
+                    patchedRaces[displayRace] = raceSummary = new();
+
+                raceSummary.Count++;
+                if (settings.Verbose.PatchedNpcEditorIds)
+                {
+                    var editorIdCounts = raceSummary.NpcEditorIdCounts ??= new(StringComparer.OrdinalIgnoreCase);
+                    editorIdCounts.TryGetValue(animalLabel, out var editorIdCount);
+                    editorIdCounts[animalLabel] = editorIdCount + 1;
+                }
 
                 if (!patchedAnimalsByCell.TryGetValue(cellDisplayLabel, out var patchedList))
                     patchedAnimalsByCell[cellDisplayLabel] = patchedList = [];
@@ -904,7 +918,7 @@ namespace FarmAnimalOwnershipProject
                 excludedLocTypesByRule,
                 excludedNamesByRule,
                 excludedDetails,
-                patchedRaceCounts,
+                patchedRaces,
                 allPlacedNpcCountsByPlugin,
                 raceMatchedCountsByPlugin,
                 patchedCount,
@@ -996,7 +1010,7 @@ namespace FarmAnimalOwnershipProject
             Dictionary<string, List<string>> excludedLocTypesByRule,
             Dictionary<string, List<string>> excludedNamesByRule,
             List<(string Animal, string Race, string Cell, string Plugin, string Rule, string RuleType)> excludedDetails,
-            Dictionary<string, int> patchedRaceCounts,
+            Dictionary<string, PatchedRaceSummary> patchedRaces,
             Dictionary<string, int> allPlacedNpcCountsByPlugin,
             Dictionary<string, int> raceMatchedCountsByPlugin,
             int patchedCount,
@@ -1007,26 +1021,59 @@ namespace FarmAnimalOwnershipProject
             int excludedOwnerVotesCount,
             int unresolvedNpcBaseCount)
         {
-            var totalPatched = patchedAnimalsByCell.Values.SelectMany(v => v).Count();
-
             if (settings.Verbose.PerPluginCounts)
-            {
-                _lastWasDivider = false;
-                PrintShortDivider();
-                ConsoleWriteLine("PLACED NPCs SEEN, BY PLUGIN".PadLeft(46));
-                PrintShortDivider();
-                ConsoleWriteLine("(diagnostic: shows every plugin the patcher saw ANY placed NPC from, and how many of");
-                ConsoleWriteLine("those race-matched as farm animals — before any exclusion/ownership filtering runs)");
-                PrintShortDivider();
-
-                foreach (var kvp in allPlacedNpcCountsByPlugin.OrderByDescending(k => k.Value))
-                {
-                    raceMatchedCountsByPlugin.TryGetValue(kvp.Key, out var raceMatched);
-                    ConsoleWriteLine($"{kvp.Key}   ({kvp.Value} placed NPCs total, {raceMatched} race-matched as farm animals)");
-                }
-            }
+                PrintPlacedNpcsByPlugin(allPlacedNpcCountsByPlugin, raceMatchedCountsByPlugin);
 
             PrintDivider();
+
+            PrintPatchedByCell(patchedAnimalsByCell);
+            PrintOwnershipSourceSummary(patchedAnimalsByCell);
+
+            if (settings.Verbose.SkippedAnimals)
+                PrintSkippedByCell(skippedAnimalsByCell);
+
+            PrintExclusionSummary(settings, excludedAnimalsByPlugin, excludedCellsByRule, excludedLocTypesByRule, excludedNamesByRule);
+
+            if (settings.Verbose.ExcludedAnimals)
+                PrintExcludedAnimals(excludedDetails);
+
+            PrintGeneralSummary(
+                settings,
+                patchedRaces,
+                patchedCount,
+                alreadyOwnedCount,
+                missingFactionCount,
+                unknownCount,
+                excludedCount,
+                excludedOwnerVotesCount,
+                unresolvedNpcBaseCount);
+
+            PrintClosingNotes(settings);
+        }
+
+        private static void PrintPlacedNpcsByPlugin(
+            Dictionary<string, int> allPlacedNpcCountsByPlugin,
+            Dictionary<string, int> raceMatchedCountsByPlugin)
+        {
+            _lastWasDivider = false;
+            PrintShortDivider();
+            ConsoleWriteLine("PLACED NPCs SEEN, BY PLUGIN".PadLeft(46));
+            PrintShortDivider();
+            ConsoleWriteLine("(diagnostic: shows every plugin the patcher saw ANY placed NPC from, and how many of");
+            ConsoleWriteLine("those race-matched as farm animals — before any exclusion/ownership filtering runs)");
+            PrintShortDivider();
+
+            foreach (var kvp in allPlacedNpcCountsByPlugin.OrderByDescending(k => k.Value))
+            {
+                raceMatchedCountsByPlugin.TryGetValue(kvp.Key, out var raceMatched);
+                ConsoleWriteLine($"{kvp.Key}   ({kvp.Value} placed NPCs total, {raceMatched} race-matched as farm animals)");
+            }
+        }
+
+        private static void PrintPatchedByCell(
+            Dictionary<string, List<(string Animal, string Plugin, string? OwnerFaction, string Reason)>> patchedAnimalsByCell)
+        {
+            var totalPatched = patchedAnimalsByCell.Values.SelectMany(v => v).Count();
 
             _lastWasDivider = false;
             PrintShortDivider();
@@ -1036,12 +1083,9 @@ namespace FarmAnimalOwnershipProject
 
             foreach (var kvp in patchedAnimalsByCell.OrderByDescending(k => k.Value.Count))
             {
-                var cellLabel = kvp.Key;
-                var animals = kvp.Value;
+                ConsoleWriteLine($"{kvp.Key}   ({kvp.Value.Count} patched)");
 
-                ConsoleWriteLine($"{cellLabel}   ({animals.Count} patched)");
-
-                var byPlugin = animals
+                var byPlugin = kvp.Value
                     .GroupBy(a => a.Plugin)
                     .Select(g => new { Plugin = g.Key, Count = g.Count(), Animals = g.ToList() })
                     .OrderByDescending(p => p.Count);
@@ -1063,7 +1107,11 @@ namespace FarmAnimalOwnershipProject
 
                 PrintDivider();
             }
+        }
 
+        private static void PrintOwnershipSourceSummary(
+            Dictionary<string, List<(string Animal, string Plugin, string? OwnerFaction, string Reason)>> patchedAnimalsByCell)
+        {
             _lastWasDivider = false;
             PrintShortDivider();
             ConsoleWriteLine("OWNERSHIP SOURCE SUMMARY".PadLeft(41));
@@ -1079,48 +1127,54 @@ namespace FarmAnimalOwnershipProject
             {
                 ConsoleWriteLine($"{entry.Count} farm animals were assigned an owner via: {entry.Reason}");
             }
+        }
 
-            if (settings.Verbose.SkippedAnimals)
+        private static void PrintSkippedByCell(
+            Dictionary<string, List<(string Animal, string Plugin, string Reason)>> skippedAnimalsByCell)
+        {
+            var totalSkipped = skippedAnimalsByCell.Values.SelectMany(v => v).Count();
+
+            _lastWasDivider = false;
+            PrintShortDivider();
+            ConsoleWriteLine("SKIPPED BY CELL".PadLeft(35));
+            ConsoleWriteLine($"Total skipped: {totalSkipped}".PadLeft(36));
+            PrintShortDivider();
+
+            foreach (var kvp in skippedAnimalsByCell.OrderByDescending(k => k.Value.Count))
             {
-                var totalSkipped = skippedAnimalsByCell.Values.SelectMany(v => v).Count();
+                ConsoleWriteLine($"{kvp.Key}   ({kvp.Value.Count} skipped)");
 
-                _lastWasDivider = false;
-                PrintShortDivider();
-                ConsoleWriteLine("SKIPPED BY CELL".PadLeft(35));
-                ConsoleWriteLine($"Total skipped: {totalSkipped}".PadLeft(36));
-                PrintShortDivider();
+                var byPlugin = kvp.Value
+                    .GroupBy(a => a.Plugin)
+                    .Select(g => new { Plugin = g.Key, Count = g.Count(), Animals = g.ToList() })
+                    .OrderByDescending(p => p.Count);
 
-                foreach (var kvp in skippedAnimalsByCell.OrderByDescending(k => k.Value.Count))
+                foreach (var pluginGroup in byPlugin)
                 {
-                    var cellLabel = kvp.Key;
-                    var animals = kvp.Value;
+                    ConsoleWriteLine($"     [{pluginGroup.Plugin}] ({pluginGroup.Count})");
 
-                    ConsoleWriteLine($"{cellLabel}   ({animals.Count} skipped)");
+                    var byAnimal = pluginGroup.Animals
+                        .GroupBy(a => new { a.Animal, a.Reason })
+                        .Select(g => new { g.Key.Animal, g.Key.Reason, Count = g.Count() })
+                        .OrderByDescending(a => a.Count);
 
-                    var byPlugin = animals
-                        .GroupBy(a => a.Plugin)
-                        .Select(g => new { Plugin = g.Key, Count = g.Count(), Animals = g.ToList() })
-                        .OrderByDescending(p => p.Count);
-
-                    foreach (var pluginGroup in byPlugin)
+                    foreach (var entry in byAnimal)
                     {
-                        ConsoleWriteLine($"     [{pluginGroup.Plugin}] ({pluginGroup.Count})");
-
-                        var byAnimal = pluginGroup.Animals
-                            .GroupBy(a => new { a.Animal, a.Reason })
-                            .Select(g => new { g.Key.Animal, g.Key.Reason, Count = g.Count() })
-                            .OrderByDescending(a => a.Count);
-
-                        foreach (var entry in byAnimal)
-                        {
-                            ConsoleWriteLine($"          {entry.Count} x {entry.Animal}   skipped: {entry.Reason}");
-                        }
+                        ConsoleWriteLine($"          {entry.Count} x {entry.Animal}   skipped: {entry.Reason}");
                     }
-
-                    PrintDivider();
                 }
-            }
 
+                PrintDivider();
+            }
+        }
+
+        private static void PrintExclusionSummary(
+            Settings settings,
+            Dictionary<string, List<string>> excludedAnimalsByPlugin,
+            Dictionary<string, List<string>> excludedCellsByRule,
+            Dictionary<string, List<string>> excludedLocTypesByRule,
+            Dictionary<string, List<string>> excludedNamesByRule)
+        {
             _lastWasDivider = false;
             PrintShortDivider();
             ConsoleWriteLine("EXCLUSION SUMMARY".PadLeft(37));
@@ -1174,38 +1228,54 @@ namespace FarmAnimalOwnershipProject
                     ConsoleWriteLine($"     {group.Count()} x {group.Key}");
                 }
             }
+        }
 
-            if (settings.Verbose.ExcludedAnimals && excludedDetails.Count > 0)
+        private static void PrintExcludedAnimals(
+            List<(string Animal, string Race, string Cell, string Plugin, string Rule, string RuleType)> excludedDetails)
+        {
+            if (excludedDetails.Count == 0)
+                return;
+
+            _lastWasDivider = false;
+            PrintShortDivider();
+            ConsoleWriteLine("EXCLUDED ANIMALS BY RACE".PadLeft(42));
+            ConsoleWriteLine($"Total excluded: {excludedDetails.Count}".PadLeft(43));
+            PrintShortDivider();
+
+            foreach (var byRace in excludedDetails.GroupBy(e => e.Race, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()))
             {
-                _lastWasDivider = false;
-                PrintShortDivider();
-                ConsoleWriteLine("EXCLUDED ANIMALS BY RACE".PadLeft(42));
-                ConsoleWriteLine($"Total excluded: {excludedDetails.Count}".PadLeft(43));
-                PrintShortDivider();
-
-                foreach (var byRace in excludedDetails.GroupBy(e => e.Race, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()))
-                {
-                    ConsoleWriteLine($"    {byRace.Count()}  {byRace.Key}");
-                }
-
-                _lastWasDivider = false;
-                PrintShortDivider();
-                ConsoleWriteLine("EXCLUDED ANIMALS BY CELL".PadLeft(42));
-                PrintShortDivider();
-
-                foreach (var byCell in excludedDetails.GroupBy(e => e.Cell, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()))
-                {
-                    ConsoleWriteLine($"{byCell.Key}   ({byCell.Count()} excluded)");
-
-                    foreach (var group in byCell.GroupBy(e => new { e.Race, e.Rule, e.RuleType }).OrderByDescending(g => g.Count()))
-                    {
-                        ConsoleWriteLine($"     {group.Count()} x {group.Key.Race}   excluded by {group.Key.RuleType} rule: {group.Key.Rule}");
-                    }
-
-                    PrintDivider();
-                }
+                ConsoleWriteLine($"    {byRace.Count()}  {byRace.Key}");
             }
 
+            _lastWasDivider = false;
+            PrintShortDivider();
+            ConsoleWriteLine("EXCLUDED ANIMALS BY CELL".PadLeft(42));
+            PrintShortDivider();
+
+            foreach (var byCell in excludedDetails.GroupBy(e => e.Cell, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()))
+            {
+                ConsoleWriteLine($"{byCell.Key}   ({byCell.Count()} excluded)");
+
+                foreach (var group in byCell.GroupBy(e => new { e.Race, e.Rule, e.RuleType }).OrderByDescending(g => g.Count()))
+                {
+                    ConsoleWriteLine($"     {group.Count()} x {group.Key.Race}   excluded by {group.Key.RuleType} rule: {group.Key.Rule}");
+                }
+
+                PrintDivider();
+            }
+        }
+
+        private static void PrintGeneralSummary(
+            Settings settings,
+            Dictionary<string, PatchedRaceSummary> patchedRaces,
+            int patchedCount,
+            int alreadyOwnedCount,
+            int missingFactionCount,
+            int unknownCount,
+            int excludedCount,
+            int excludedOwnerVotesCount,
+            int unresolvedNpcBaseCount)
+        {
             _lastWasDivider = false;
             PrintShortDivider();
             ConsoleWriteLine("GENERAL SUMMARY".PadLeft(35));
@@ -1230,13 +1300,27 @@ namespace FarmAnimalOwnershipProject
 
                 if (showRaces)
                 {
-                    foreach (var kvp in patchedRaceCounts.OrderByDescending(k => k.Value))
+                    foreach (var kvp in patchedRaces.OrderByDescending(k => k.Value.Count))
                     {
-                        ConsoleWriteLine($"    {kvp.Value}  {kvp.Key}(s)");
+                        var raceLine = $"    {kvp.Value.Count}  {kvp.Key}(s)";
+
+                        if (settings.Verbose.PatchedNpcEditorIds && kvp.Value.NpcEditorIdCounts is { } editorIdCounts)
+                        {
+                            var editorIds = string.Join(", ", editorIdCounts
+                                .OrderByDescending(entry => entry.Value)
+                                .ThenBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
+                                .Select(entry => $"{entry.Key} ({entry.Value})"));
+                            raceLine += $"  [NPC EditorIDs: {editorIds}]";
+                        }
+
+                        ConsoleWriteLine(raceLine);
                     }
                 }
             }
+        }
 
+        private static void PrintClosingNotes(Settings settings)
+        {
             PrintDivider();
             ConsoleWriteLine("Patching is complete! Scroll up to read a report on what was patched, skipped, and excluded.");
             ConsoleWriteLine("A couple of notes on the summaries: In the General Summary there is typically a large overlap between no suitable owner and an unsuitable location, since they can both be true.");
