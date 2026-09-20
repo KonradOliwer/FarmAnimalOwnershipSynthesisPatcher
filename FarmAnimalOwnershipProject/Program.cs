@@ -530,6 +530,7 @@ namespace FarmAnimalOwnershipProject
             var excludedCellsByRule = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var excludedLocTypesByRule = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var excludedNamesByRule = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            var excludedDetails = new List<(string Animal, string Race, string Cell, string Plugin, string Rule, string RuleType)>();
             var patchedRaceCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
             // Diagnostics: which plugins are contributing placed NPCs at all (regardless of race),
@@ -683,7 +684,7 @@ namespace FarmAnimalOwnershipProject
             var cellContextCache = new Dictionary<FormKey, (ILocationGetter? Location, bool CellRuleExcluded, string? CellRuleMatched, bool LocTypeExcluded, string? LocTypeRuleMatched)>();
 
             // Memoizes plugin exclusion by plugin name — same idea, trivial cost either way, but free to cache.
-            var pluginExclusionCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            var pluginExclusionCache = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
             var pass2Stopwatch = Stopwatch.StartNew();
             foreach (var (context, animalLabel, pluginName, cellEdid, displayRace, containingCell) in candidates)
@@ -739,12 +740,23 @@ namespace FarmAnimalOwnershipProject
                     cellContextCache[cellCacheKey] = cellCtx;
                 }
 
+                var location = cellCtx.Location;
+
+                // Giving cellEdid this Location fallback would silently change which animals
+                // ExcludeCellRules excludes.
+                var cellDisplayLabel = containingCell?.EditorID != null
+                    ? $"{containingCell.EditorID} [Cell]"
+                    : location?.EditorID != null
+                        ? $"{location.EditorID} [Location]"
+                        : "Unknown cell";
+
                 if (cellCtx.CellRuleExcluded)
                 {
                     if (!excludedCellsByRule.TryGetValue(cellCtx.CellRuleMatched!, out var cellList))
                         excludedCellsByRule[cellCtx.CellRuleMatched!] = cellList = [];
 
                     cellList.Add(animalLabel);
+                    excludedDetails.Add((animalLabel, displayRace, cellDisplayLabel, pluginName, cellCtx.CellRuleMatched!, "cell"));
                     excludedCount++;
                     continue;
                 }
@@ -755,22 +767,24 @@ namespace FarmAnimalOwnershipProject
                         excludedLocTypesByRule[cellCtx.LocTypeRuleMatched!] = list = [];
 
                     list.Add(animalLabel);
+                    excludedDetails.Add((animalLabel, displayRace, cellDisplayLabel, pluginName, cellCtx.LocTypeRuleMatched!, "loctype"));
                     excludedCount++;
                     continue;
                 }
 
-                if (!pluginExclusionCache.TryGetValue(pluginName, out var pluginExcluded))
+                if (!pluginExclusionCache.TryGetValue(pluginName, out var matchedPluginRule))
                 {
-                    pluginExcluded = settings.ExcludePlugins.Any(pattern => MatchesPattern(pattern, pluginName));
-                    pluginExclusionCache[pluginName] = pluginExcluded;
+                    matchedPluginRule = settings.ExcludePlugins.FirstOrDefault(pattern => MatchesPattern(pattern, pluginName));
+                    pluginExclusionCache[pluginName] = matchedPluginRule;
                 }
 
-                if (pluginExcluded)
+                if (matchedPluginRule != null)
                 {
                     if (!excludedAnimalsByPlugin.TryGetValue(pluginName, out var list))
                         excludedAnimalsByPlugin[pluginName] = list = [];
 
                     list.Add(animalLabel);
+                    excludedDetails.Add((animalLabel, displayRace, cellDisplayLabel, pluginName, matchedPluginRule, "plugin"));
                     excludedCount++;
                     continue;
                 }
@@ -783,31 +797,12 @@ namespace FarmAnimalOwnershipProject
                         excludedNamesByRule[matchedNameTerm] = list = [];
 
                     list.Add(animalLabel);
+                    excludedDetails.Add((animalLabel, displayRace, cellDisplayLabel, pluginName, matchedNameTerm, "name"));
                     excludedCount++;
                     continue;
                 }
 
-                // Matching. Naming conventions and manual faction matches beat plugin-based
-                // matching; the raw location is passed to TryGetTownFaction so these lookups
-                // still run even when there's no location or cell record to go on (the lack
-                // of records only affects the skip reason below). Location comes from the
-                // per-cell cache above — no need to resolve it a second time here.
-                var location = cellCtx.Location;
                 bool hasNoLocationData = location == null && containingCell == null;
-
-                // Display-only label for report grouping — falls back to the Location's EditorID when
-                // the Cell itself has none (very common for unnamed exterior wilderness cells in
-                // Skyrim), so "Unknown cell" only appears when there's truly nothing to show. Tagged
-                // with which record the name actually came from, since a Cell name and a Location name
-                // aren't the same thing and it wasn't always obvious which one was being shown. This is
-                // deliberately separate from cellEdid above, which still drives ExcludeCellRules
-                // matching unchanged — using the Location fallback there too would silently change
-                // which items get excluded, not just how they're labeled in the report.
-                var cellDisplayLabel = containingCell?.EditorID != null
-                    ? $"{containingCell.EditorID} [Cell]"
-                    : location?.EditorID != null
-                        ? $"{location.EditorID} [Location]"
-                        : "Unknown cell";
 
                 var pluginLocalResult = TryGetPluginLocalFactionMatch(pluginName, location, containingCell, factionsByPlugin);
                 IOwnerGetter? ownerRecord = pluginLocalResult.Faction;
@@ -908,6 +903,7 @@ namespace FarmAnimalOwnershipProject
                 excludedCellsByRule,
                 excludedLocTypesByRule,
                 excludedNamesByRule,
+                excludedDetails,
                 patchedRaceCounts,
                 allPlacedNpcCountsByPlugin,
                 raceMatchedCountsByPlugin,
@@ -999,6 +995,7 @@ namespace FarmAnimalOwnershipProject
             Dictionary<string, List<string>> excludedCellsByRule,
             Dictionary<string, List<string>> excludedLocTypesByRule,
             Dictionary<string, List<string>> excludedNamesByRule,
+            List<(string Animal, string Race, string Cell, string Plugin, string Rule, string RuleType)> excludedDetails,
             Dictionary<string, int> patchedRaceCounts,
             Dictionary<string, int> allPlacedNpcCountsByPlugin,
             Dictionary<string, int> raceMatchedCountsByPlugin,
@@ -1175,6 +1172,37 @@ namespace FarmAnimalOwnershipProject
                 foreach (var group in entry.Animals.GroupBy(a => a, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()))
                 {
                     ConsoleWriteLine($"     {group.Count()} x {group.Key}");
+                }
+            }
+
+            if (settings.Verbose.ExcludedAnimals && excludedDetails.Count > 0)
+            {
+                _lastWasDivider = false;
+                PrintShortDivider();
+                ConsoleWriteLine("EXCLUDED ANIMALS BY RACE".PadLeft(42));
+                ConsoleWriteLine($"Total excluded: {excludedDetails.Count}".PadLeft(43));
+                PrintShortDivider();
+
+                foreach (var byRace in excludedDetails.GroupBy(e => e.Race, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()))
+                {
+                    ConsoleWriteLine($"    {byRace.Count()}  {byRace.Key}");
+                }
+
+                _lastWasDivider = false;
+                PrintShortDivider();
+                ConsoleWriteLine("EXCLUDED ANIMALS BY CELL".PadLeft(42));
+                PrintShortDivider();
+
+                foreach (var byCell in excludedDetails.GroupBy(e => e.Cell, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()))
+                {
+                    ConsoleWriteLine($"{byCell.Key}   ({byCell.Count()} excluded)");
+
+                    foreach (var group in byCell.GroupBy(e => new { e.Race, e.Rule, e.RuleType }).OrderByDescending(g => g.Count()))
+                    {
+                        ConsoleWriteLine($"     {group.Count()} x {group.Key.Race}   excluded by {group.Key.RuleType} rule: {group.Key.Rule}");
+                    }
+
+                    PrintDivider();
                 }
             }
 

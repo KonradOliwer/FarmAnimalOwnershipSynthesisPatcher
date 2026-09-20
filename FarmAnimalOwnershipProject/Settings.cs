@@ -32,6 +32,10 @@ namespace FarmAnimalOwnershipProject
         [SynthesisTooltip("Lists the farm animals that were left unpatched because no suitable owner could be found, grouped by cell and plugin.")]
         public bool SkippedAnimals { get; set; } = false;
 
+        [SynthesisSettingName("Excluded animals, by race and by cell")]
+        [SynthesisTooltip("Lists every farm animal an exclusion rule kept out of patching, first tallied by race and then broken down per cell with the rule responsible. Use this to check whether the exclusions are catching what you intended.")]
+        public bool ExcludedAnimals { get; set; } = false;
+
         [SynthesisSettingName("Exclusion detail (list animal names)")]
         [SynthesisTooltip("Adds the individual animal names under each rule in the Exclusion Summary, instead of just a count.")]
         public bool ExclusionDetail { get; set; } = false;
