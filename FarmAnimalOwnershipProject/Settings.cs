@@ -97,7 +97,7 @@ namespace FarmAnimalOwnershipProject
         [SynthesisTooltip("Actor name terms to exclude from patching")]
         public List<string> ExcludeNameTerms { get; set; } =
         [
-            "Wild", "Bandit", "Forsworn", "Sabre", "Pigeon", "Zombie", "Draugr", "Durzog", "Stray", "Dead", "Ghost",
+            "Wild", "Bandit", "Forsworn", "Sabre", "Pigeon", "Zombie", "Draugr", "Durzog", "Stray", "Dead", "Ghost", "Cockatrice",
             "Vampire", "Necromancer", "Bone", "Feral", "Giant", "Dragon", "Troll", "ShellBug", "Netch", "BYOH",
             "Player", "CW",
         ];
