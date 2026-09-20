@@ -32,6 +32,10 @@ namespace FarmAnimalOwnershipProject
         [SynthesisTooltip("Lists the farm animals that were left unpatched because no suitable owner could be found, grouped by cell and plugin.")]
         public bool SkippedAnimals { get; set; } = false;
 
+        [SynthesisSettingName("Show NPC EditorIDs beside race counts")]
+        [SynthesisTooltip("Shows the base NPC EditorIDs beside each race in the General Summary, with the number of placed NPCs patched for each ID. Use these IDs when checking Names to exclude.")]
+        public bool PatchedNpcEditorIds { get; set; } = false;
+
         [SynthesisSettingName("Excluded animals, by race and by cell")]
         [SynthesisTooltip("Lists every farm animal an exclusion rule kept out of patching, first tallied by race and then broken down per cell with the rule responsible. Use this to check whether the exclusions are catching what you intended.")]
         public bool ExcludedAnimals { get; set; } = false;
@@ -212,7 +216,7 @@ namespace FarmAnimalOwnershipProject
         ];
 
         [SynthesisSettingName("Verbose logging")]
-        [SynthesisTooltip("Extra diagnostic output, off by default. Turn these on when an animal wasn't patched and you need to find out why.")]
+        [SynthesisTooltip("Extra diagnostic output, off by default. Turn these on to inspect patched, skipped, or excluded animals.")]
         public VerboseSettings Verbose { get; set; } = new();
     }
 }

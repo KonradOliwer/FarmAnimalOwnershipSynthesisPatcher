@@ -454,6 +454,12 @@ namespace FarmAnimalOwnershipProject
         // Main patching pass
         // ------------------------------------------------------------------
 
+        private sealed class PatchedRaceSummary
+        {
+            public int Count { get; set; }
+            public Dictionary<string, int>? NpcEditorIdCounts { get; set; }
+        }
+
         public static void RunPatch(IPatcherState<ISkyrimMod, ISkyrimModGetter> state)
         {
             var overallStopwatch = Stopwatch.StartNew();
@@ -531,7 +537,7 @@ namespace FarmAnimalOwnershipProject
             var excludedLocTypesByRule = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var excludedNamesByRule = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var excludedDetails = new List<(string Animal, string Race, string Cell, string Plugin, string Rule, string RuleType)>();
-            var patchedRaceCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var patchedRaces = new Dictionary<string, PatchedRaceSummary>(StringComparer.OrdinalIgnoreCase);
 
             // Diagnostics: which plugins are contributing placed NPCs at all (regardless of race),
             // and which are contributing race-matched farm animals specifically. Answers "are my
@@ -879,8 +885,16 @@ namespace FarmAnimalOwnershipProject
                 patchNpc.FactionRank = rankToApply;
                 patchedCount++;
 
-                patchedRaceCounts.TryGetValue(displayRace, out var patchedRaceCount);
-                patchedRaceCounts[displayRace] = patchedRaceCount + 1;
+                if (!patchedRaces.TryGetValue(displayRace, out var raceSummary))
+                    patchedRaces[displayRace] = raceSummary = new();
+
+                raceSummary.Count++;
+                if (settings.Verbose.PatchedNpcEditorIds)
+                {
+                    var editorIdCounts = raceSummary.NpcEditorIdCounts ??= new(StringComparer.OrdinalIgnoreCase);
+                    editorIdCounts.TryGetValue(animalLabel, out var editorIdCount);
+                    editorIdCounts[animalLabel] = editorIdCount + 1;
+                }
 
                 if (!patchedAnimalsByCell.TryGetValue(cellDisplayLabel, out var patchedList))
                     patchedAnimalsByCell[cellDisplayLabel] = patchedList = [];
@@ -904,7 +918,7 @@ namespace FarmAnimalOwnershipProject
                 excludedLocTypesByRule,
                 excludedNamesByRule,
                 excludedDetails,
-                patchedRaceCounts,
+                patchedRaces,
                 allPlacedNpcCountsByPlugin,
                 raceMatchedCountsByPlugin,
                 patchedCount,
@@ -996,7 +1010,7 @@ namespace FarmAnimalOwnershipProject
             Dictionary<string, List<string>> excludedLocTypesByRule,
             Dictionary<string, List<string>> excludedNamesByRule,
             List<(string Animal, string Race, string Cell, string Plugin, string Rule, string RuleType)> excludedDetails,
-            Dictionary<string, int> patchedRaceCounts,
+            Dictionary<string, PatchedRaceSummary> patchedRaces,
             Dictionary<string, int> allPlacedNpcCountsByPlugin,
             Dictionary<string, int> raceMatchedCountsByPlugin,
             int patchedCount,
@@ -1025,7 +1039,7 @@ namespace FarmAnimalOwnershipProject
 
             PrintGeneralSummary(
                 settings,
-                patchedRaceCounts,
+                patchedRaces,
                 patchedCount,
                 alreadyOwnedCount,
                 missingFactionCount,
@@ -1253,7 +1267,7 @@ namespace FarmAnimalOwnershipProject
 
         private static void PrintGeneralSummary(
             Settings settings,
-            Dictionary<string, int> patchedRaceCounts,
+            Dictionary<string, PatchedRaceSummary> patchedRaces,
             int patchedCount,
             int alreadyOwnedCount,
             int missingFactionCount,
@@ -1286,9 +1300,20 @@ namespace FarmAnimalOwnershipProject
 
                 if (showRaces)
                 {
-                    foreach (var kvp in patchedRaceCounts.OrderByDescending(k => k.Value))
+                    foreach (var kvp in patchedRaces.OrderByDescending(k => k.Value.Count))
                     {
-                        ConsoleWriteLine($"    {kvp.Value}  {kvp.Key}(s)");
+                        var raceLine = $"    {kvp.Value.Count}  {kvp.Key}(s)";
+
+                        if (settings.Verbose.PatchedNpcEditorIds && kvp.Value.NpcEditorIdCounts is { } editorIdCounts)
+                        {
+                            var editorIds = string.Join(", ", editorIdCounts
+                                .OrderByDescending(entry => entry.Value)
+                                .ThenBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
+                                .Select(entry => $"{entry.Key} ({entry.Value})"));
+                            raceLine += $"  [NPC EditorIDs: {editorIds}]";
+                        }
+
+                        ConsoleWriteLine(raceLine);
                     }
                 }
             }
